@@ -9,6 +9,14 @@ enum MathMode {
     Dollars,
 }
 
+const ENV_INDENT: &str = "  ";
+
+#[derive(Clone)]
+struct EnvState {
+    name: String,
+    in_item: bool,
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
@@ -41,63 +49,45 @@ fn main() -> io::Result<()> {
 fn process(input: &str) -> String {
     let mut out = String::new();
     let mut para: Vec<String> = Vec::new();
-    let mut ignored_env: Option<String> = None;
     let mut display_math: Option<MathMode> = None;
+    let mut env_stack: Vec<EnvState> = Vec::new();
 
-    for line in input.lines() {
-        let trimmed = line.trim_start();
-
-        if let Some(env) = ignored_env.clone() {
-            append_line(&mut out, line);
-            if line_contains_end_env(line, &env) {
-                ignored_env = None;
-            }
-            continue;
-        }
-
+    for raw_line in input.lines() {
         if let Some(mode) = display_math {
-            append_line(&mut out, line);
-            if display_math_ends(line, mode) {
+            append_line(&mut out, raw_line);
+            if display_math_ends(raw_line, mode) {
                 display_math = None;
             }
             continue;
         }
 
-        if trimmed.is_empty() {
+        let (line, is_env_line) = format_environment_line(raw_line, &mut env_stack);
+        let trimmed = line.trim_start();
+
+        if is_env_line {
             flush_paragraph(&mut out, &mut para);
-            append_line(&mut out, line);
+            append_line(&mut out, &line);
             continue;
         }
 
-        if trimmed.starts_with('%') || contains_unescaped_percent(line) {
+        if trimmed.is_empty() {
             flush_paragraph(&mut out, &mut para);
-            append_line(&mut out, line);
+            append_line(&mut out, &line);
+            continue;
+        }
+
+        if trimmed.starts_with('%') || contains_unescaped_percent(&line) {
+            flush_paragraph(&mut out, &mut para);
+            append_line(&mut out, &line);
             continue;
         }
 
         if let Some(mode) = display_math_starts(trimmed) {
             flush_paragraph(&mut out, &mut para);
-            append_line(&mut out, line);
+            append_line(&mut out, &line);
             if !display_math_ends_after_start(trimmed, mode) {
                 display_math = Some(mode);
             }
-            continue;
-        }
-
-        if let Some(env) = begin_env_at_start(trimmed) {
-            flush_paragraph(&mut out, &mut para);
-            append_line(&mut out, line);
-
-            if is_ignored_env(&env) && !line_contains_end_env(line, &env) {
-                ignored_env = Some(env);
-            }
-
-            continue;
-        }
-
-        if end_env_at_start(trimmed).is_some() {
-            flush_paragraph(&mut out, &mut para);
-            append_line(&mut out, line);
             continue;
         }
 
@@ -105,17 +95,78 @@ fn process(input: &str) -> String {
             flush_paragraph(&mut out, &mut para);
         }
 
-        if is_command_barrier(line) {
+        if is_command_barrier(&line) {
             flush_paragraph(&mut out, &mut para);
-            append_line(&mut out, line);
+            append_line(&mut out, &line);
             continue;
         }
 
-        para.push(line.to_string());
+        para.push(line);
     }
 
     flush_paragraph(&mut out, &mut para);
     out
+}
+
+fn format_environment_line(line: &str, env_stack: &mut Vec<EnvState>) -> (String, bool) {
+    let trimmed = line.trim_start();
+
+    let begin = begin_env_at_start(trimmed);
+    let end = end_env_at_start(trimmed);
+
+    let was_in_env = !env_stack.is_empty();
+    let is_env_line = was_in_env || begin.is_some() || end.is_some();
+
+    if !is_env_line {
+        return (line.to_string(), false);
+    }
+
+    if trimmed.is_empty() {
+        return (String::new(), true);
+    }
+
+    if let Some(end_name) = end.as_deref() {
+        if let Some(pos) = env_stack.iter().rposition(|env| env.name == end_name) {
+            env_stack.truncate(pos);
+        } else {
+            env_stack.pop();
+        }
+    }
+
+    let starts_item_line = starts_command(trimmed, r"\item");
+
+    let mut extra_item_indent = env_stack
+        .iter()
+        .filter(|env| is_list_env(&env.name) && env.in_item)
+        .count();
+
+    if starts_item_line && extra_item_indent > 0 {
+        extra_item_indent -= 1;
+    }
+
+    let indent_depth = env_stack.len() + extra_item_indent;
+    let formatted = format!("{}{}", ENV_INDENT.repeat(indent_depth), trimmed);
+
+    if starts_item_line {
+        if let Some(pos) = env_stack.iter().rposition(|env| is_list_env(&env.name)) {
+            env_stack[pos].in_item = true;
+        }
+    }
+
+    if let Some(env) = begin {
+        if !line_contains_end_env(trimmed, &env) {
+            env_stack.push(EnvState {
+                name: env,
+                in_item: false,
+            });
+        }
+    }
+
+    (formatted, true)
+}
+
+fn is_list_env(env: &str) -> bool {
+    matches!(env, "itemize" | "enumerate" | "description")
 }
 
 fn flush_paragraph(out: &mut String, para: &mut Vec<String>) {
