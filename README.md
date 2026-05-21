@@ -2,10 +2,10 @@
 
 Some very opinionated tools written in Rust to cleanup a LaTeX document.
 
-- `fixtex`: formats a given LaTeX document to
+- **fixtex**: formats a given LaTeX document to
   - add a new line after each sentence (or removing a new line if a sentence continues)
   - add proper indents to each environment
-- `fixbib`: scans a given LaTeX document for bibliography files and
+- **fixbib**: scans a given LaTeX document for bibliography files and
   - removes duplicates
   - sorts references by date
   - unifies citation keys to `[auth:lower][veryshorttitle:lower][year]`
@@ -38,4 +38,4 @@ fixbib main.tex
 
 You can append `--dry-run` to avoid writing changes to the files.
 Generally, `.bak` files are created but I strongly recommend you to have a version control.
-No backup, no mercy.
+**No backup, no mercy.**
