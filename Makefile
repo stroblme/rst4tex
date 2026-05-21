@@ -18,7 +18,7 @@ $(BUILD_DIR)/fixtex: fixtex.rs | $(BUILD_DIR)
 $(BUILD_DIR)/fixbib: fixbib.rs | $(BUILD_DIR)
 	$(RUSTC) $(RELEASE_FLAGS) -o $@ $<
 
-install: all
+install:
 	mkdir -p $(INSTALL_DIR)
 	cp -f $(BUILD_DIR)/fixtex $(BUILD_DIR)/fixbib $(INSTALL_DIR)/
 	chmod +x $(INSTALL_DIR)/fixtex $(INSTALL_DIR)/fixbib

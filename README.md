@@ -1,6 +1,6 @@
 # RST4TEX
 
-Some very opinionated tools written in Rust to cleanup a LaTeX document.
+A collection of very opinionated tools written in Rust to cleanup a LaTeX document.
 
 - **fixtex**: formats a given LaTeX document to
   - add a new line after each sentence (or removing a new line if a sentence continues)
@@ -16,7 +16,7 @@ There is a makefile available to build and install these scripts.
 Just run
 
 ```bash
-make all
+make
 ```
 
 to have the compiled binaries available in `$HOME/.local/bin`.
@@ -38,4 +38,5 @@ fixbib main.tex
 
 You can append `--dry-run` to avoid writing changes to the files.
 Generally, `.bak` files are created but I strongly recommend you to have a version control.
-**No backup, no mercy.**
+
+> No backup, no mercy.
