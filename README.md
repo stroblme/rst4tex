@@ -21,7 +21,6 @@ make
 
 to have the compiled binaries available in `$HOME/.local/bin`.
 
-
 ## Usage
 
 The scripts are intended to be registered as git hooks, but of course you can run them manually:
@@ -40,3 +39,7 @@ You can append `--dry-run` to avoid writing changes to the files.
 Generally, `.bak` files are created but I strongly recommend you to have a version control.
 
 > No backup, no mercy.
+
+## Related Work
+
+Checkout [tex-fmt](https://github.com/wgunderwood/tex-fmt) for a more advanced and comprehensive LaTex formatter.
