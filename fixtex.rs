@@ -29,10 +29,12 @@ fn process(input: &str) -> String {
     let mut para: Vec<String> = Vec::new();
     let mut display_math: Option<MathMode> = None;
     let mut env_stack: Vec<EnvState> = Vec::new();
+    let mut delimiter_depth = 0usize;
 
     for raw_line in input.lines() {
         if let Some(mode) = display_math {
-            append_line(&mut out, raw_line);
+            let line = format_delimiter_line(raw_line, &mut delimiter_depth);
+            append_line(&mut out, &line);
             if display_math_ends(raw_line, mode) {
                 display_math = None;
             }
@@ -40,9 +42,21 @@ fn process(input: &str) -> String {
         }
 
         let (line, is_env_line) = format_environment_line(raw_line, &mut env_stack);
+        let had_delimiter_depth = delimiter_depth > 0;
+        let should_format_delimiters = is_env_line
+            || had_delimiter_depth
+            || starts_delimiter_group(line.trim_start())
+            || is_command_barrier(&line);
+        let line = if should_format_delimiters {
+            format_delimiter_line(&line, &mut delimiter_depth)
+        } else {
+            line
+        };
+        let is_delimiter_line =
+            should_format_delimiters && (had_delimiter_depth || delimiter_depth > 0);
         let trimmed = line.trim_start();
 
-        if is_env_line {
+        if is_env_line || is_delimiter_line {
             flush_paragraph(&mut out, &mut para);
             append_line(&mut out, &line);
             continue;
@@ -371,6 +385,189 @@ fn leading_ws(s: &str) -> &str {
 fn append_line(out: &mut String, line: &str) {
     out.push_str(line);
     out.push('\n');
+}
+
+fn starts_delimiter_group(s: &str) -> bool {
+    s.starts_with('(') || s.starts_with('[') || s.starts_with('{') || s.starts_with(r"\{")
+}
+
+fn format_delimiter_line(line: &str, delimiter_depth: &mut usize) -> String {
+    let trimmed = line.trim_start();
+
+    if trimmed.is_empty() {
+        return line.to_string();
+    }
+
+    let line_depth = delimiter_depth.saturating_sub(leading_closing_delimiters(trimmed));
+    let formatted = format!(
+        "{}{}{}",
+        leading_ws(line),
+        ENV_INDENT.repeat(line_depth),
+        trimmed
+    );
+
+    apply_delimiter_delta(trimmed, delimiter_depth);
+    formatted
+}
+
+fn leading_closing_delimiters(mut s: &str) -> usize {
+    let mut count = 0usize;
+
+    loop {
+        s = s.trim_start();
+
+        if let Some(rest) = consume_right_delimiter(s) {
+            count += 1;
+            s = rest;
+        } else if let Some(rest) = consume_literal_closing_delimiter(s) {
+            count += 1;
+            s = rest;
+        } else {
+            break;
+        }
+    }
+
+    count
+}
+
+fn apply_delimiter_delta(line: &str, delimiter_depth: &mut usize) {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+
+    while i < line.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'%' {
+            break;
+        }
+
+        if bytes[i] == b'\\' {
+            if let Some(rest) = consume_left_delimiter(&line[i..]) {
+                *delimiter_depth += 1;
+                i = line.len() - rest.len();
+                continue;
+            }
+
+            if let Some(rest) = consume_right_delimiter(&line[i..]) {
+                *delimiter_depth = delimiter_depth.saturating_sub(1);
+                i = line.len() - rest.len();
+                continue;
+            }
+
+            if line[i..].starts_with(r"\{") {
+                *delimiter_depth += 1;
+                i += 2;
+                continue;
+            }
+
+            if line[i..].starts_with(r"\}") {
+                *delimiter_depth = delimiter_depth.saturating_sub(1);
+                i += 2;
+                continue;
+            }
+
+            if let Some(next_i) = skip_escaped_token(line, i) {
+                i = next_i;
+                continue;
+            }
+        }
+
+        let c = line[i..].chars().next().unwrap();
+
+        match c {
+            '(' | '[' | '{' => *delimiter_depth += 1,
+            ')' | ']' | '}' => *delimiter_depth = delimiter_depth.saturating_sub(1),
+            _ => {}
+        }
+
+        i += c.len_utf8();
+    }
+}
+
+fn consume_left_delimiter(s: &str) -> Option<&str> {
+    consume_sized_delimiter_command(s, "left")
+}
+
+fn consume_right_delimiter(s: &str) -> Option<&str> {
+    consume_sized_delimiter_command(s, "right")
+}
+
+fn consume_sized_delimiter_command<'a>(s: &'a str, command: &str) -> Option<&'a str> {
+    let command_len = 1 + command.len();
+
+    if !s.starts_with('\\') || !s[1..].starts_with(command) {
+        return None;
+    }
+
+    if s[command_len..]
+        .chars()
+        .next()
+        .map(|c| c.is_alphabetic())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let mut idx = skip_ws(s, command_len);
+
+    if idx >= s.len() {
+        return Some(&s[idx..]);
+    }
+
+    if s[idx..].starts_with('\\') {
+        idx = skip_latex_command_or_escaped_char(s, idx);
+    } else {
+        let c = s[idx..].chars().next().unwrap();
+        idx += c.len_utf8();
+    }
+
+    Some(&s[idx..])
+}
+
+fn consume_literal_closing_delimiter(s: &str) -> Option<&str> {
+    let c = s.chars().next()?;
+
+    if matches!(c, ')' | ']' | '}') {
+        Some(&s[c.len_utf8()..])
+    } else if s.starts_with(r"\}") {
+        Some(&s[2..])
+    } else {
+        None
+    }
+}
+
+fn skip_escaped_token(line: &str, i: usize) -> Option<usize> {
+    let next = line[i + 1..].chars().next()?;
+
+    if next.is_alphabetic() {
+        Some(skip_latex_command_or_escaped_char(line, i))
+    } else {
+        Some(i + 1 + next.len_utf8())
+    }
+}
+
+fn skip_latex_command_or_escaped_char(line: &str, i: usize) -> usize {
+    let mut idx = i + 1;
+
+    while idx < line.len() {
+        let c = line[idx..].chars().next().unwrap();
+
+        if c.is_alphabetic() {
+            idx += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    if idx == i + 1 && idx < line.len() {
+        let c = line[idx..].chars().next().unwrap();
+        idx += c.len_utf8();
+    }
+
+    idx
 }
 
 fn begin_env_at_start(s: &str) -> Option<String> {
