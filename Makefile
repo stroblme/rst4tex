@@ -12,10 +12,10 @@ all: $(BINARIES) install
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/fixtex: fixtex.rs | $(BUILD_DIR)
+$(BUILD_DIR)/fixtex: fixtex.rs common.rs | $(BUILD_DIR)
 	$(RUSTC) $(RELEASE_FLAGS) -o $@ $<
 
-$(BUILD_DIR)/fixbib: fixbib.rs | $(BUILD_DIR)
+$(BUILD_DIR)/fixbib: fixbib.rs common.rs | $(BUILD_DIR)
 	$(RUSTC) $(RELEASE_FLAGS) -o $@ $<
 
 install:

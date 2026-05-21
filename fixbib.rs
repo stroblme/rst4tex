@@ -2,18 +2,16 @@
 //
 // Usage:
 //   rustc fixbib.rs
-//   ./fixbib main.tex --write
+//   ./fixbib main.tex
 //
-// Without --write it only prints a summary.
-//
-// Backups are written as:
-//   main.tex.bak
-//   refs.bib.bak
+// The tex file and referenced bibliography files are updated in place with .bak backups.
 
 use std::collections::{HashMap, HashSet};
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
+
+mod common;
+
+use common::{collapse_whitespace, skip_ws};
 
 #[derive(Clone, Debug)]
 struct BibEntry {
@@ -31,21 +29,14 @@ struct BibFile {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 || args.len() > 3 {
-        eprintln!("Usage: {} main.tex [--dry-run]", args[0]);
-        std::process::exit(1);
-    }
-
-    let tex_path = PathBuf::from(&args[1]);
-    let do_write = !args.iter().any(|a| a == "--dry-run");
-
-    let tex = fs::read_to_string(&tex_path)?;
+    let tex_path = common::input_path_arg("main.tex");
+    let tex = std::fs::read_to_string(&tex_path)?;
     let bib_paths = find_bib_files(&tex, &tex_path);
 
     if bib_paths.is_empty() {
-        eprintln!("No bibliography found. Expected \\bibliography{{...}} or \\addbibresource{{...}}.");
+        eprintln!(
+            "No bibliography found. Expected \\bibliography{{...}} or \\addbibresource{{...}}."
+        );
         std::process::exit(1);
     }
 
@@ -53,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut entries = Vec::new();
 
     for path in bib_paths {
-        let raw = fs::read_to_string(&path)?;
+        let raw = std::fs::read_to_string(&path)?;
         let file_idx = bib_files.len();
         let (specials, mut file_entries) = parse_bib(&raw, file_idx);
         bib_files.push(BibFile { path, specials });
@@ -77,7 +68,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .find(|&i| used_keys.contains(&entries[i].old_key))
             .unwrap_or(idxs[0]);
 
-        let group_is_used = keep_all || idxs.iter().any(|&i| used_keys.contains(&entries[i].old_key));
+        let group_is_used = keep_all
+            || idxs
+                .iter()
+                .any(|&i| used_keys.contains(&entries[i].old_key));
 
         for &i in idxs {
             rep_for_old.insert(entries[i].old_key.clone(), chosen);
@@ -110,34 +104,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for (&rep, new_key) in &new_for_rep {
-        new_key_year.insert(new_key.clone(), entry_year_i32(&entries[rep]).unwrap_or(9999));
+        new_key_year.insert(
+            new_key.clone(),
+            entry_year_i32(&entries[rep]).unwrap_or(9999),
+        );
     }
 
     let new_tex = rewrite_tex_citations(&tex, &old_to_new, &new_key_year);
     let new_bibs = render_bib_files(&bib_files, &entries, &kept, &new_for_rep);
 
-    println!("Found bibliography files:");
-    for bf in &bib_files {
-        println!("  {}", bf.path.display());
+    for (path, content) in new_bibs {
+        common::write_with_backup(&path, &content)?;
     }
 
-    println!();
-    println!("Original entries: {}", entries.len());
-    println!("Used citation keys in tex: {}", used_keys.len());
-    println!("Kept entries after duplicate/unused removal: {}", kept.len());
-    println!("Removed entries: {}", entries.len().saturating_sub(kept.len()));
+    common::write_with_backup(&tex_path, &new_tex)?;
 
-    println!();
-    println!("Citation key rewrites:");
+    eprintln!("Found bibliography files:");
+    for bf in &bib_files {
+        eprintln!("  {}", bf.path.display());
+    }
+
+    eprintln!();
+    eprintln!("Original entries: {}", entries.len());
+    eprintln!("Used citation keys in tex: {}", used_keys.len());
+    eprintln!(
+        "Kept entries after duplicate/unused removal: {}",
+        kept.len()
+    );
+    eprintln!(
+        "Removed entries: {}",
+        entries.len().saturating_sub(kept.len())
+    );
+
+    eprintln!();
+    eprintln!("Citation key rewrites:");
     let mut rewrites: Vec<_> = old_to_new.iter().collect();
     rewrites.sort_by(|a, b| a.0.cmp(b.0));
     for (old, new) in rewrites.iter().take(30) {
         if old != new {
-            println!("  {} -> {}", old, new);
+            eprintln!("  {} -> {}", old, new);
         }
     }
     if rewrites.len() > 30 {
-        println!("  ...");
+        eprintln!("  ...");
     }
 
     let missing: Vec<_> = used_keys
@@ -146,26 +155,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     if !missing.is_empty() {
-        println!();
-        println!("Warning: cited keys not found in bib file:");
+        eprintln!();
+        eprintln!("Warning: cited keys not found in bib file:");
         for k in missing {
-            println!("  {}", k);
+            eprintln!("  {}", k);
         }
     }
 
-    if do_write {
-        write_with_backup(&tex_path, &new_tex)?;
-
-        for (path, content) in new_bibs {
-            write_with_backup(&path, &content)?;
-        }
-
-        println!();
-        println!("Wrote updated files. Backups have suffix .bak.");
-    } else {
-        println!();
-        println!("Dry run. Re-run without --dry-run to modify files.");
-    }
+    eprintln!();
+    eprintln!("Wrote updated files. Backups have suffix .bak.");
 
     Ok(())
 }
@@ -241,7 +239,7 @@ fn find_command_brace_args(tex: &str, target: &str) -> Vec<String> {
         let mut j = i;
 
         loop {
-            skip_ws(tex, &mut j);
+            j = skip_ws(tex, j);
             if j < b.len() && b[j] == b'[' {
                 if let Some(close) = find_matching(tex, j, b'[', b']') {
                     j = close + 1;
@@ -253,7 +251,7 @@ fn find_command_brace_args(tex: &str, target: &str) -> Vec<String> {
             }
         }
 
-        skip_ws(tex, &mut j);
+        j = skip_ws(tex, j);
 
         if j < b.len() && b[j] == b'{' {
             if let Some(close) = find_matching(tex, j, b'{', b'}') {
@@ -281,7 +279,7 @@ fn parse_bib(raw: &str, file_idx: usize) -> (Vec<String>, Vec<BibEntry>) {
         let at = i + rel;
         let mut j = at + 1;
 
-        skip_ws(raw, &mut j);
+        j = skip_ws(raw, j);
 
         let kind_start = j;
         while j < b.len() && b[j].is_ascii_alphabetic() {
@@ -296,7 +294,7 @@ fn parse_bib(raw: &str, file_idx: usize) -> (Vec<String>, Vec<BibEntry>) {
         let kind = raw[kind_start..j].to_string();
         let kind_l = kind.to_ascii_lowercase();
 
-        skip_ws(raw, &mut j);
+        j = skip_ws(raw, j);
 
         if j >= b.len() || !(b[j] == b'{' || b[j] == b'(') {
             i = j;
@@ -362,9 +360,7 @@ fn parse_fields(body: &str) -> HashMap<String, String> {
 
         let name_start = i;
 
-        while i < b.len()
-            && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'-')
-        {
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'-') {
             i += 1;
         }
 
@@ -545,7 +541,7 @@ fn cite_group_at(tex: &str, pos: usize) -> Option<(String, usize, usize)> {
     }
 
     loop {
-        skip_ws(tex, &mut i);
+        i = skip_ws(tex, i);
 
         if i < b.len() && b[i] == b'[' {
             let close = find_matching(tex, i, b'[', b']')?;
@@ -555,7 +551,7 @@ fn cite_group_at(tex: &str, pos: usize) -> Option<(String, usize, usize)> {
         }
     }
 
-    skip_ws(tex, &mut i);
+    i = skip_ws(tex, i);
 
     if i < b.len() && b[i] == b'{' {
         let close = find_matching(tex, i, b'{', b'}')?;
@@ -652,7 +648,12 @@ fn entry_signature(e: &BibEntry) -> String {
     if title.trim().is_empty() {
         format!("key:{}", e.old_key.to_ascii_lowercase())
     } else {
-        format!("{}|{}|{}", normalize_spaces(&author), normalize_spaces(&title), year)
+        format!(
+            "{}|{}|{}",
+            normalize_spaces(&author),
+            normalize_spaces(&title),
+            year
+        )
     }
 }
 
@@ -812,7 +813,7 @@ fn words_from_latex(raw: &str) -> Vec<String> {
 }
 
 fn normalize_spaces(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    collapse_whitespace(s)
 }
 
 fn find_top_level_comma(s: &str) -> Option<usize> {
@@ -878,31 +879,4 @@ fn find_matching(s: &str, open_idx: usize, open: u8, close: u8) -> Option<usize>
     }
 
     None
-}
-
-fn skip_ws(s: &str, i: &mut usize) {
-    let b = s.as_bytes();
-
-    while *i < b.len() && b[*i].is_ascii_whitespace() {
-        *i += 1;
-    }
-}
-
-fn write_with_backup(path: &Path, content: &str) -> std::io::Result<()> {
-    let backup = backup_path(path);
-
-    if path.exists() {
-        fs::copy(path, &backup)?;
-    }
-
-    fs::write(path, content)
-}
-
-fn backup_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "backup".to_string());
-
-    path.with_file_name(format!("{}.bak", file_name))
 }

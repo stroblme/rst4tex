@@ -1,7 +1,7 @@
-use std::{
-    env, fs,
-    io::{self, Read},
-};
+mod common;
+
+use common::{collapse_whitespace, skip_ws};
+use std::io;
 
 #[derive(Clone, Copy)]
 enum MathMode {
@@ -18,32 +18,10 @@ struct EnvState {
 }
 
 fn main() -> io::Result<()> {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() > 3 {
-        eprintln!("Usage: {} [input.tex|-] [output.tex]", args[0]);
-        std::process::exit(2);
-    }
-
-    let input = if args.len() >= 2 && args[1] != "-" {
-        fs::read_to_string(&args[1])?
-    } else {
-        let mut s = String::new();
-        io::stdin().read_to_string(&mut s)?;
-        s
-    };
-
+    let input_path = common::input_path_arg("input.tex");
+    let input = std::fs::read_to_string(&input_path)?;
     let output = process(&input);
-
-    if args.len() == 3 {
-        fs::write(&args[2], output)?;
-    } else if args.len() == 2 && args[1] != "-" {
-        fs::write(&args[1], output)?;
-    } else {
-        print!("{output}");
-    }
-
-    Ok(())
+    common::write_with_backup(&input_path, &output)
 }
 
 fn process(input: &str) -> String {
@@ -179,8 +157,13 @@ fn is_non_indenting_env(env: &str) -> bool {
     }
     matches!(
         env,
-        "part" | "chapter" | "section" | "subsection" | "subsubsection"
-            | "paragraph" | "subparagraph"
+        "part"
+            | "chapter"
+            | "section"
+            | "subsection"
+            | "subsubsection"
+            | "paragraph"
+            | "subparagraph"
     )
 }
 
@@ -328,9 +311,8 @@ fn is_decimal_point(chars: &[(usize, char)], i: usize) -> bool {
 fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
     let mut prefix = s[..dot_byte].trim_end();
 
-    prefix = prefix.trim_end_matches(|c: char| {
-        matches!(c, ')' | ']' | '}' | '"' | '\'' | '’' | '”')
-    });
+    prefix =
+        prefix.trim_end_matches(|c: char| matches!(c, ')' | ']' | '}' | '"' | '\'' | '’' | '”'));
 
     let lower = prefix.to_lowercase();
 
@@ -342,16 +324,14 @@ fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
         .split_whitespace()
         .last()
         .unwrap_or("")
-        .trim_matches(|c: char| {
-            c.is_ascii_punctuation() && c != '.'
-        });
+        .trim_matches(|c: char| c.is_ascii_punctuation() && c != '.');
 
     let token_lower = token.trim_end_matches('.').to_lowercase();
 
     const ABBREVS: &[&str] = &[
-        "e.g", "i.e", "cf", "vs", "etc", "fig", "figs", "eq", "eqs", "sec", "secs",
-        "ch", "chap", "app", "ref", "refs", "no", "nos", "dr", "mr", "mrs", "ms",
-        "prof", "inc", "ltd", "jr", "sr",
+        "e.g", "i.e", "cf", "vs", "etc", "fig", "figs", "eq", "eqs", "sec", "secs", "ch", "chap",
+        "app", "ref", "refs", "no", "nos", "dr", "mr", "mrs", "ms", "prof", "inc", "ltd", "jr",
+        "sr",
     ];
 
     if ABBREVS.contains(&token_lower.as_str()) {
@@ -374,29 +354,7 @@ fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
 }
 
 fn is_sentence_closer(c: char) -> bool {
-    matches!(
-        c,
-        ')' | ']' | '}' | '"' | '\'' | '’' | '”' | '»'
-    )
-}
-
-fn collapse_whitespace(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn leading_ws(s: &str) -> &str {
-    let n = s
-        .char_indices()
-        .find(|(_, c)| !c.is_whitespace())
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
-
-    &s[..n]
-}
-
-fn append_line(out: &mut String, line: &str) {
-    out.push_str(line);
-    out.push('\n');
+    matches!(c, ')' | ']' | '}' | '"' | '\'' | '’' | '”' | '»')
 }
 
 fn begin_env_at_start(s: &str) -> Option<String> {
@@ -454,6 +412,21 @@ fn contains_unescaped_percent(line: &str) -> bool {
     }
 
     false
+}
+
+fn leading_ws(s: &str) -> &str {
+    let n = s
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+
+    &s[..n]
+}
+
+fn append_line(out: &mut String, line: &str) {
+    out.push_str(line);
+    out.push('\n');
 }
 
 fn is_command_barrier(line: &str) -> bool {
@@ -527,18 +500,4 @@ fn take_paragraph_prefix(s: &str) -> Option<(String, String, String)> {
     }
 
     None
-}
-
-fn skip_ws(s: &str, mut idx: usize) -> usize {
-    while idx < s.len() {
-        let c = s[idx..].chars().next().unwrap();
-
-        if c.is_whitespace() {
-            idx += c.len_utf8();
-        } else {
-            break;
-        }
-    }
-
-    idx
 }
