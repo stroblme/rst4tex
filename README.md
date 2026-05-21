@@ -3,13 +3,14 @@
 A collection of very opinionated tools written in Rust to improve code quality of a LaTeX document.
 
 - **fixtex**: formats a given LaTeX document to
+  - all the basic formatting rules (double white- and trailing whitespaces, double return lines, etc.)
   - add a new line after each sentence (or removing a new line if a sentence continues)
   - add proper indentions to each environment (except `document` and `section`s)
 - **fixbib**: scans a given LaTeX document for bibliography files and
   - removes duplicates
   - sorts references by date when using multi-citations
   - unifies citation keys to `[auth:lower][veryshorttitle:lower][year]`
-  - updates both, bibliography and document file
+  - updates bibliography files and rewrites document citations
 
 ## Install
 
@@ -37,11 +38,13 @@ fixtex main.tex
 fixbib main.tex
 ```
 
-You can append `--dry-run` to avoid writing changes to the files.
-Generally, `.bak` files are created but I strongly recommend you to have a version control.
+Both tools read the LaTeX document from the given path and update files in place.
+`.bak` files are created, but I strongly recommend you to have a version control.
 
 > No backup, no mercy.
 
 ## Related Work
 
 Checkout [tex-fmt](https://github.com/wgunderwood/tex-fmt) for a more advanced and comprehensive LaTex formatter.
+
+Of course the standard [latexindent](https://github.com/cmhughes/latexindent.pl) is the go-to for a versatile and battle-proven LaTex formatter.
