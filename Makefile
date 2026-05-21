@@ -7,7 +7,7 @@ BINARIES := $(BUILD_DIR)/fixtex $(BUILD_DIR)/fixbib
 
 .PHONY: all install uninstall clean
 
-all: $(BINARIES)
+all: $(BINARIES) install
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
