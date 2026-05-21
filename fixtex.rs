@@ -157,13 +157,8 @@ fn is_non_indenting_env(env: &str) -> bool {
     }
     matches!(
         env,
-        "part"
-            | "chapter"
-            | "section"
-            | "subsection"
-            | "subsubsection"
-            | "paragraph"
-            | "subparagraph"
+        "part" | "chapter" | "section" | "subsection" | "subsubsection"
+            | "paragraph" | "subparagraph"
     )
 }
 
@@ -311,8 +306,9 @@ fn is_decimal_point(chars: &[(usize, char)], i: usize) -> bool {
 fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
     let mut prefix = s[..dot_byte].trim_end();
 
-    prefix =
-        prefix.trim_end_matches(|c: char| matches!(c, ')' | ']' | '}' | '"' | '\'' | '’' | '”'));
+    prefix = prefix.trim_end_matches(|c: char| {
+        matches!(c, ')' | ']' | '}' | '"' | '\'' | '’' | '”')
+    });
 
     let lower = prefix.to_lowercase();
 
@@ -324,14 +320,16 @@ fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
         .split_whitespace()
         .last()
         .unwrap_or("")
-        .trim_matches(|c: char| c.is_ascii_punctuation() && c != '.');
+        .trim_matches(|c: char| {
+            c.is_ascii_punctuation() && c != '.'
+        });
 
     let token_lower = token.trim_end_matches('.').to_lowercase();
 
     const ABBREVS: &[&str] = &[
-        "e.g", "i.e", "cf", "vs", "etc", "fig", "figs", "eq", "eqs", "sec", "secs", "ch", "chap",
-        "app", "ref", "refs", "no", "nos", "dr", "mr", "mrs", "ms", "prof", "inc", "ltd", "jr",
-        "sr",
+        "e.g", "i.e", "cf", "vs", "etc", "fig", "figs", "eq", "eqs", "sec", "secs",
+        "ch", "chap", "app", "ref", "refs", "no", "nos", "dr", "mr", "mrs", "ms",
+        "prof", "inc", "ltd", "jr", "sr",
     ];
 
     if ABBREVS.contains(&token_lower.as_str()) {
@@ -354,7 +352,25 @@ fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
 }
 
 fn is_sentence_closer(c: char) -> bool {
-    matches!(c, ')' | ']' | '}' | '"' | '\'' | '’' | '”' | '»')
+    matches!(
+        c,
+        ')' | ']' | '}' | '"' | '\'' | '’' | '”' | '»'
+    )
+}
+
+fn leading_ws(s: &str) -> &str {
+    let n = s
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+
+    &s[..n]
+}
+
+fn append_line(out: &mut String, line: &str) {
+    out.push_str(line);
+    out.push('\n');
 }
 
 fn begin_env_at_start(s: &str) -> Option<String> {
@@ -412,21 +428,6 @@ fn contains_unescaped_percent(line: &str) -> bool {
     }
 
     false
-}
-
-fn leading_ws(s: &str) -> &str {
-    let n = s
-        .char_indices()
-        .find(|(_, c)| !c.is_whitespace())
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
-
-    &s[..n]
-}
-
-fn append_line(out: &mut String, line: &str) {
-    out.push_str(line);
-    out.push('\n');
 }
 
 fn is_command_barrier(line: &str) -> bool {

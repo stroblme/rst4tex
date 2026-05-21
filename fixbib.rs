@@ -68,10 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .find(|&i| used_keys.contains(&entries[i].old_key))
             .unwrap_or(idxs[0]);
 
-        let group_is_used = keep_all
-            || idxs
-                .iter()
-                .any(|&i| used_keys.contains(&entries[i].old_key));
+        let group_is_used = keep_all || idxs.iter().any(|&i| used_keys.contains(&entries[i].old_key));
 
         for &i in idxs {
             rep_for_old.insert(entries[i].old_key.clone(), chosen);
@@ -104,10 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for (&rep, new_key) in &new_for_rep {
-        new_key_year.insert(
-            new_key.clone(),
-            entry_year_i32(&entries[rep]).unwrap_or(9999),
-        );
+        new_key_year.insert(new_key.clone(), entry_year_i32(&entries[rep]).unwrap_or(9999));
     }
 
     let new_tex = rewrite_tex_citations(&tex, &old_to_new, &new_key_year);
@@ -360,7 +354,9 @@ fn parse_fields(body: &str) -> HashMap<String, String> {
 
         let name_start = i;
 
-        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'-') {
+        while i < b.len()
+            && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'-')
+        {
             i += 1;
         }
 
@@ -648,12 +644,7 @@ fn entry_signature(e: &BibEntry) -> String {
     if title.trim().is_empty() {
         format!("key:{}", e.old_key.to_ascii_lowercase())
     } else {
-        format!(
-            "{}|{}|{}",
-            normalize_spaces(&author),
-            normalize_spaces(&title),
-            year
-        )
+        format!("{}|{}|{}", normalize_spaces(&author), normalize_spaces(&title), year)
     }
 }
 
