@@ -144,7 +144,11 @@ fn format_environment_line(line: &str, env_stack: &mut Vec<EnvState>) -> (String
         extra_item_indent -= 1;
     }
 
-    let indent_depth = env_stack.len() + extra_item_indent;
+    let indent_depth = env_stack
+        .iter()
+        .filter(|env| !is_non_indenting_env(&env.name))
+        .count()
+        + extra_item_indent;
     let formatted = format!("{}{}", ENV_INDENT.repeat(indent_depth), trimmed);
 
     if starts_item_line {
@@ -167,6 +171,17 @@ fn format_environment_line(line: &str, env_stack: &mut Vec<EnvState>) -> (String
 
 fn is_list_env(env: &str) -> bool {
     matches!(env, "itemize" | "enumerate" | "description")
+}
+
+fn is_non_indenting_env(env: &str) -> bool {
+    if env == "document" {
+        return true;
+    }
+    matches!(
+        env,
+        "part" | "chapter" | "section" | "subsection" | "subsubsection"
+            | "paragraph" | "subparagraph"
+    )
 }
 
 fn flush_paragraph(out: &mut String, para: &mut Vec<String>) {
