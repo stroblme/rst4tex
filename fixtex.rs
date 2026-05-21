@@ -400,44 +400,6 @@ fn line_contains_end_env(line: &str, env: &str) -> bool {
     line.contains(&format!(r"\end{{{env}}}"))
 }
 
-fn is_ignored_env(env: &str) -> bool {
-    matches!(
-        env,
-        "figure"
-            | "figure*"
-            | "table"
-            | "table*"
-            | "equation"
-            | "equation*"
-            | "align"
-            | "align*"
-            | "alignat"
-            | "alignat*"
-            | "gather"
-            | "gather*"
-            | "multline"
-            | "multline*"
-            | "flalign"
-            | "flalign*"
-            | "split"
-            | "cases"
-            | "array"
-            | "tabular"
-            | "tabular*"
-            | "tabularx"
-            | "longtable"
-            | "tikzpicture"
-            | "picture"
-            | "verbatim"
-            | "lstlisting"
-            | "minted"
-            | "algorithm"
-            | "algorithmic"
-            | "algorithm2e"
-            | "thebibliography"
-    )
-}
-
 fn display_math_starts(s: &str) -> Option<MathMode> {
     if s.starts_with(r"\[") {
         Some(MathMode::Bracket)
