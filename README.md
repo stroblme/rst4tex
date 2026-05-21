@@ -48,3 +48,6 @@ Both tools read the LaTeX document from the given path and update files in place
 Checkout [tex-fmt](https://github.com/wgunderwood/tex-fmt) for a more advanced and comprehensive LaTex formatter.
 
 Of course the standard [latexindent](https://github.com/cmhughes/latexindent.pl) is the go-to for a versatile and battle-proven LaTex formatter.
+
+Nothing to complain about these tools.
+I just found that they don't match my needs.
