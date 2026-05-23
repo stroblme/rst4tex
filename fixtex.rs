@@ -17,6 +17,23 @@ struct EnvState {
     in_item: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnvCommandKind {
+    Begin,
+    End,
+}
+
+struct EnvCommand {
+    kind: EnvCommandKind,
+    name: String,
+    start: usize,
+}
+
+struct DelimiterState {
+    depth: usize,
+    base_indent: String,
+}
+
 fn main() -> io::Result<()> {
     let input_path = common::input_path_arg("input.tex");
     let input = std::fs::read_to_string(&input_path)?;
@@ -29,11 +46,14 @@ fn process(input: &str) -> String {
     let mut para: Vec<String> = Vec::new();
     let mut display_math: Option<MathMode> = None;
     let mut env_stack: Vec<EnvState> = Vec::new();
-    let mut delimiter_depth = 0usize;
+    let mut delimiter_state = DelimiterState {
+        depth: 0,
+        base_indent: String::new(),
+    };
 
     for raw_line in input.lines() {
         if let Some(mode) = display_math {
-            let line = format_delimiter_line(raw_line, &mut delimiter_depth);
+            let line = format_delimiter_line(raw_line, &mut delimiter_state);
             append_line(&mut out, &line);
             if display_math_ends(raw_line, mode) {
                 display_math = None;
@@ -42,18 +62,18 @@ fn process(input: &str) -> String {
         }
 
         let (line, is_env_line) = format_environment_line(raw_line, &mut env_stack);
-        let had_delimiter_depth = delimiter_depth > 0;
+        let had_delimiter_depth = delimiter_state.depth > 0;
         let should_format_delimiters = is_env_line
             || had_delimiter_depth
             || starts_delimiter_group(line.trim_start())
             || is_command_barrier(&line);
         let line = if should_format_delimiters {
-            format_delimiter_line(&line, &mut delimiter_depth)
+            format_delimiter_line(&line, &mut delimiter_state)
         } else {
             line
         };
         let is_delimiter_line =
-            should_format_delimiters && (had_delimiter_depth || delimiter_depth > 0);
+            should_format_delimiters && (had_delimiter_depth || delimiter_state.depth > 0);
         let trimmed = line.trim_start();
 
         if is_env_line || is_delimiter_line {
@@ -89,7 +109,7 @@ fn process(input: &str) -> String {
 
         if is_command_barrier(&line) {
             flush_paragraph(&mut out, &mut para);
-            append_line(&mut out, &line);
+            append_line(&mut out, line.trim_start());
             continue;
         }
 
@@ -103,11 +123,10 @@ fn process(input: &str) -> String {
 fn format_environment_line(line: &str, env_stack: &mut Vec<EnvState>) -> (String, bool) {
     let trimmed = line.trim_start();
 
-    let begin = begin_env_at_start(trimmed);
-    let end = end_env_at_start(trimmed);
+    let env_commands = env_commands_in_line(trimmed);
 
     let was_in_env = !env_stack.is_empty();
-    let is_env_line = was_in_env || begin.is_some() || end.is_some();
+    let is_env_line = was_in_env || env_commands.first().map(|cmd| cmd.start == 0).unwrap_or(false);
 
     if !is_env_line {
         return (line.to_string(), false);
@@ -117,11 +136,11 @@ fn format_environment_line(line: &str, env_stack: &mut Vec<EnvState>) -> (String
         return (String::new(), true);
     }
 
-    if let Some(end_name) = end.as_deref() {
-        if let Some(pos) = env_stack.iter().rposition(|env| env.name == end_name) {
-            env_stack.truncate(pos);
-        } else {
-            env_stack.pop();
+    let mut first_unapplied_command = 0usize;
+    if let Some(command) = env_commands.first() {
+        if command.start == 0 && command.kind == EnvCommandKind::End {
+            pop_env(env_stack, &command.name);
+            first_unapplied_command = 1;
         }
     }
 
@@ -149,16 +168,29 @@ fn format_environment_line(line: &str, env_stack: &mut Vec<EnvState>) -> (String
         }
     }
 
-    if let Some(env) = begin {
-        if !line_contains_end_env(trimmed, &env) {
-            env_stack.push(EnvState {
-                name: env,
-                in_item: false,
-            });
-        }
+    for command in env_commands.iter().skip(first_unapplied_command) {
+        apply_env_command(env_stack, command);
     }
 
     (formatted, true)
+}
+
+fn apply_env_command(env_stack: &mut Vec<EnvState>, command: &EnvCommand) {
+    match command.kind {
+        EnvCommandKind::Begin => env_stack.push(EnvState {
+            name: command.name.clone(),
+            in_item: false,
+        }),
+        EnvCommandKind::End => pop_env(env_stack, &command.name),
+    }
+}
+
+fn pop_env(env_stack: &mut Vec<EnvState>, end_name: &str) {
+    if let Some(pos) = env_stack.iter().rposition(|env| env.name == end_name) {
+        env_stack.truncate(pos);
+    } else {
+        env_stack.pop();
+    }
 }
 
 fn is_list_env(env: &str) -> bool {
@@ -181,7 +213,7 @@ fn flush_paragraph(out: &mut String, para: &mut Vec<String>) {
         return;
     }
 
-    let indent = leading_ws(&para[0]).to_string();
+    let indent = "";
 
     let mut pieces: Vec<String> = para
         .iter()
@@ -350,8 +382,7 @@ fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
         return true;
     }
 
-    // Catches U.S., U.K., Ph.D., etc.
-    if token.contains('.') {
+    if is_dotted_abbreviation(token) {
         return true;
     }
 
@@ -363,6 +394,23 @@ fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
             .next()
             .map(|c| c.is_uppercase())
             .unwrap_or(false)
+}
+
+fn is_dotted_abbreviation(token: &str) -> bool {
+    let token = token.trim_matches('.');
+
+    if !token.contains('.') {
+        return false;
+    }
+
+    token.split('.').all(|part| {
+        let letters: String = part.chars().filter(|c| c.is_alphabetic()).collect();
+        !letters.is_empty()
+            && letters.chars().count() <= 2
+            && part
+                .chars()
+                .all(|c| c.is_alphabetic() || matches!(c, '-' | '\'' | '’'))
+    })
 }
 
 fn is_sentence_closer(c: char) -> bool {
@@ -391,22 +439,38 @@ fn starts_delimiter_group(s: &str) -> bool {
     s.starts_with('(') || s.starts_with('[') || s.starts_with('{') || s.starts_with(r"\{")
 }
 
-fn format_delimiter_line(line: &str, delimiter_depth: &mut usize) -> String {
+fn format_delimiter_line(line: &str, delimiter_state: &mut DelimiterState) -> String {
     let trimmed = line.trim_start();
 
     if trimmed.is_empty() {
         return line.to_string();
     }
 
-    let line_depth = delimiter_depth.saturating_sub(leading_closing_delimiters(trimmed));
+    let base_indent = if delimiter_state.depth > 0 {
+        delimiter_state.base_indent.as_str()
+    } else {
+        leading_ws(line)
+    };
+    let line_depth = delimiter_state
+        .depth
+        .saturating_sub(leading_closing_delimiters(trimmed));
     let formatted = format!(
         "{}{}{}",
-        leading_ws(line),
+        base_indent,
         ENV_INDENT.repeat(line_depth),
         trimmed
     );
 
-    apply_delimiter_delta(trimmed, delimiter_depth);
+    if delimiter_state.depth == 0 {
+        delimiter_state.base_indent = leading_ws(&formatted).to_string();
+    }
+
+    apply_delimiter_delta(trimmed, &mut delimiter_state.depth);
+
+    if delimiter_state.depth == 0 {
+        delimiter_state.base_indent.clear();
+    }
+
     formatted
 }
 
@@ -445,8 +509,10 @@ fn apply_delimiter_delta(line: &str, delimiter_depth: &mut usize) {
         }
 
         if bytes[i] == b'\\' {
-            if let Some(rest) = consume_left_delimiter(&line[i..]) {
-                *delimiter_depth += 1;
+            if let Some((rest, delimiter)) = consume_left_delimiter(&line[i..]) {
+                if delimiter != "." {
+                    *delimiter_depth += 1;
+                }
                 i = line.len() - rest.len();
                 continue;
             }
@@ -487,15 +553,15 @@ fn apply_delimiter_delta(line: &str, delimiter_depth: &mut usize) {
     }
 }
 
-fn consume_left_delimiter(s: &str) -> Option<&str> {
+fn consume_left_delimiter(s: &str) -> Option<(&str, &str)> {
     consume_sized_delimiter_command(s, "left")
 }
 
 fn consume_right_delimiter(s: &str) -> Option<&str> {
-    consume_sized_delimiter_command(s, "right")
+    consume_sized_delimiter_command(s, "right").map(|(rest, _)| rest)
 }
 
-fn consume_sized_delimiter_command<'a>(s: &'a str, command: &str) -> Option<&'a str> {
+fn consume_sized_delimiter_command<'a>(s: &'a str, command: &str) -> Option<(&'a str, &'a str)> {
     let command_len = 1 + command.len();
 
     if !s.starts_with('\\') || !s[1..].starts_with(command) {
@@ -514,8 +580,10 @@ fn consume_sized_delimiter_command<'a>(s: &'a str, command: &str) -> Option<&'a 
     let mut idx = skip_ws(s, command_len);
 
     if idx >= s.len() {
-        return Some(&s[idx..]);
+        return Some((&s[idx..], ""));
     }
+
+    let delimiter_start = idx;
 
     if s[idx..].starts_with('\\') {
         idx = skip_latex_command_or_escaped_char(s, idx);
@@ -524,7 +592,7 @@ fn consume_sized_delimiter_command<'a>(s: &'a str, command: &str) -> Option<&'a 
         idx += c.len_utf8();
     }
 
-    Some(&s[idx..])
+    Some((&s[idx..], &s[delimiter_start..idx]))
 }
 
 fn consume_literal_closing_delimiter(s: &str) -> Option<&str> {
@@ -570,20 +638,44 @@ fn skip_latex_command_or_escaped_char(line: &str, i: usize) -> usize {
     idx
 }
 
-fn begin_env_at_start(s: &str) -> Option<String> {
-    let rest = s.strip_prefix(r"\begin{")?;
-    let end = rest.find('}')?;
-    Some(rest[..end].to_string())
+fn env_commands_in_line(s: &str) -> Vec<EnvCommand> {
+    let mut commands = Vec::new();
+    let mut idx = 0usize;
+
+    while idx < s.len() {
+        if let Some((kind, name, next_idx)) = env_command_at(s, idx) {
+            commands.push(EnvCommand {
+                kind,
+                name,
+                start: idx,
+            });
+            idx = next_idx;
+            continue;
+        }
+
+        let c = s[idx..].chars().next().unwrap();
+        idx += c.len_utf8();
+    }
+
+    commands
 }
 
-fn end_env_at_start(s: &str) -> Option<String> {
-    let rest = s.strip_prefix(r"\end{")?;
-    let end = rest.find('}')?;
-    Some(rest[..end].to_string())
+fn env_command_at(s: &str, idx: usize) -> Option<(EnvCommandKind, String, usize)> {
+    let rest = &s[idx..];
+
+    if let Some((name, len)) = env_name_after(rest, r"\begin{") {
+        Some((EnvCommandKind::Begin, name, idx + len))
+    } else if let Some((name, len)) = env_name_after(rest, r"\end{") {
+        Some((EnvCommandKind::End, name, idx + len))
+    } else {
+        None
+    }
 }
 
-fn line_contains_end_env(line: &str, env: &str) -> bool {
-    line.contains(&format!(r"\end{{{env}}}"))
+fn env_name_after(s: &str, prefix: &str) -> Option<(String, usize)> {
+    let rest = s.strip_prefix(prefix)?;
+    let end = rest.find('}')?;
+    Some((rest[..end].to_string(), prefix.len() + end + 1))
 }
 
 fn display_math_starts(s: &str) -> Option<MathMode> {
