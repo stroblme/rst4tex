@@ -2,7 +2,7 @@
 
 A collection of (opinionated) tools written in Rust to improve code quality of a LaTeX document.
 
-- **fixbib**: scans a given LaTeX document for bibliography files and
+- **fixbib**: scans a given LaTeX document and its `\include{}` files for bibliography files and
   - removes duplicates
   - sorts references by date when using multi-citations
   - unifies citation keys to `[auth:lower][veryshorttitle:lower][year]`

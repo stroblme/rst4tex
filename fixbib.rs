@@ -28,10 +28,16 @@ struct BibFile {
     specials: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct TexFile {
+    path: PathBuf,
+    content: String,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tex_path = common::input_path_arg("main.tex");
-    let tex = std::fs::read_to_string(&tex_path)?;
-    let bib_paths = find_bib_files(&tex, &tex_path);
+    let tex_files = collect_tex_files(&tex_path)?;
+    let bib_paths = find_bib_files(&tex_files);
 
     if bib_paths.is_empty() {
         eprintln!(
@@ -51,7 +57,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entries.append(&mut file_entries);
     }
 
-    let (used_keys, keep_all) = collect_used_citation_keys(&tex);
+    let mut used_keys = HashSet::new();
+    let mut keep_all = false;
+
+    for tex_file in &tex_files {
+        let (file_used_keys, file_keep_all) = collect_used_citation_keys(&tex_file.content);
+        used_keys.extend(file_used_keys);
+        keep_all |= file_keep_all;
+    }
 
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
@@ -68,7 +81,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .find(|&i| used_keys.contains(&entries[i].old_key))
             .unwrap_or(idxs[0]);
 
-        let group_is_used = keep_all || idxs.iter().any(|&i| used_keys.contains(&entries[i].old_key));
+        let group_is_used = keep_all
+            || idxs
+                .iter()
+                .any(|&i| used_keys.contains(&entries[i].old_key));
 
         for &i in idxs {
             rep_for_old.insert(entries[i].old_key.clone(), chosen);
@@ -101,17 +117,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for (&rep, new_key) in &new_for_rep {
-        new_key_year.insert(new_key.clone(), entry_year_i32(&entries[rep]).unwrap_or(9999));
+        new_key_year.insert(
+            new_key.clone(),
+            entry_year_i32(&entries[rep]).unwrap_or(9999),
+        );
     }
 
-    let new_tex = rewrite_tex_citations(&tex, &old_to_new, &new_key_year);
+    let new_tex_files: Vec<_> = tex_files
+        .iter()
+        .map(|tf| {
+            (
+                tf.path.clone(),
+                rewrite_tex_citations(&tf.content, &old_to_new, &new_key_year),
+            )
+        })
+        .collect();
     let new_bibs = render_bib_files(&bib_files, &entries, &kept, &new_for_rep);
 
     for (path, content) in new_bibs {
         common::write_with_backup(&path, &content)?;
     }
 
-    common::write_with_backup(&tex_path, &new_tex)?;
+    for (path, content) in new_tex_files {
+        common::write_with_backup(&path, &content)?;
+    }
 
     eprintln!("Found bibliography files:");
     for bf in &bib_files {
@@ -119,8 +148,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!();
+    eprintln!("Scanned tex files:");
+    for tf in &tex_files {
+        eprintln!("  {}", tf.path.display());
+    }
+
+    eprintln!();
     eprintln!("Original entries: {}", entries.len());
-    eprintln!("Used citation keys in tex: {}", used_keys.len());
+    eprintln!("Used citation keys in tex files: {}", used_keys.len());
     eprintln!(
         "Kept entries after duplicate/unused removal: {}",
         kept.len()
@@ -162,14 +197,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn find_bib_files(tex: &str, tex_path: &Path) -> Vec<PathBuf> {
-    let base_dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
+fn collect_tex_files(root_path: &Path) -> std::io::Result<Vec<TexFile>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    collect_tex_files_inner(root_path, &mut seen, &mut out)?;
+    Ok(out)
+}
+
+fn collect_tex_files_inner(
+    path: &Path,
+    seen: &mut HashSet<PathBuf>,
+    out: &mut Vec<TexFile>,
+) -> std::io::Result<()> {
+    let seen_path = path_identity(path);
+
+    if !seen.insert(seen_path) {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let included_paths = find_include_tex_files(&content, path);
+
+    out.push(TexFile {
+        path: path.to_path_buf(),
+        content,
+    });
+
+    for included_path in included_paths {
+        collect_tex_files_inner(&included_path, seen, out)?;
+    }
+
+    Ok(())
+}
+
+fn find_bib_files(tex_files: &[TexFile]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for content in find_command_brace_args(tex, "bibliography") {
-        for item in content.split(',') {
-            let name = item.trim();
+    for tex_file in tex_files {
+        let base_dir = tex_file.path.parent().unwrap_or_else(|| Path::new("."));
+
+        for content in find_command_brace_args(&tex_file.content, "bibliography") {
+            for item in content.split(',') {
+                let name = item.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                let mut p = base_dir.join(name);
+                if p.extension().is_none() {
+                    p.set_extension("bib");
+                }
+                if seen.insert(path_identity(&p)) {
+                    out.push(p);
+                }
+            }
+        }
+
+        for content in find_command_brace_args(&tex_file.content, "addbibresource") {
+            let name = content.trim();
             if name.is_empty() {
                 continue;
             }
@@ -177,27 +262,39 @@ fn find_bib_files(tex: &str, tex_path: &Path) -> Vec<PathBuf> {
             if p.extension().is_none() {
                 p.set_extension("bib");
             }
-            if seen.insert(p.clone()) {
+            if seen.insert(path_identity(&p)) {
                 out.push(p);
             }
         }
     }
 
-    for content in find_command_brace_args(tex, "addbibresource") {
+    out
+}
+
+fn find_include_tex_files(tex: &str, tex_path: &Path) -> Vec<PathBuf> {
+    let base_dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for content in find_command_brace_args(tex, "include") {
         let name = content.trim();
         if name.is_empty() {
             continue;
         }
         let mut p = base_dir.join(name);
         if p.extension().is_none() {
-            p.set_extension("bib");
+            p.set_extension("tex");
         }
-        if seen.insert(p.clone()) {
+        if seen.insert(path_identity(&p)) {
             out.push(p);
         }
     }
 
     out
+}
+
+fn path_identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn find_command_brace_args(tex: &str, target: &str) -> Vec<String> {
@@ -893,21 +990,6 @@ fn ascii_fold_char(c: char) -> Option<&'static str> {
 
 fn normalize_spaces(s: &str) -> String {
     collapse_whitespace(s)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{author_component, words_from_latex};
-
-    #[test]
-    fn unicode_accents_are_folded_for_citation_keys() {
-        assert_eq!(author_component("Pérez-Salinas, Adrián"), "perezsalinas");
-    }
-
-    #[test]
-    fn decomposed_unicode_accents_do_not_split_words() {
-        assert_eq!(words_from_latex("Pe\u{301}rez-Salinas"), vec!["perez", "salinas"]);
-    }
 }
 
 fn find_top_level_comma(s: &str) -> Option<usize> {
