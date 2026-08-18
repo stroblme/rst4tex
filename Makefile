@@ -5,7 +5,7 @@ RELEASE_FLAGS := -O
 
 BINARIES := $(BUILD_DIR)/fixtex $(BUILD_DIR)/fixbib
 
-.PHONY: all install uninstall clean
+.PHONY: all install uninstall clean test
 
 all: $(BINARIES) install
 
@@ -31,3 +31,7 @@ uninstall:
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+test: | $(BUILD_DIR)
+	$(RUSTC) --test -o $(BUILD_DIR)/fixtex-test fixtex.rs && $(BUILD_DIR)/fixtex-test
+	$(RUSTC) --test -o $(BUILD_DIR)/fixbib-test fixbib.rs && $(BUILD_DIR)/fixbib-test

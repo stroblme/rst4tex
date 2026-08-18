@@ -2,7 +2,9 @@
 //
 // Usage:
 //   rustc fixbib.rs
-//   ./fixbib main.tex
+//   ./fixbib main.tex [--no-delete]
+//
+// --no-delete keeps references that are not cited anywhere.
 //
 // The tex file and referenced bibliography files are updated in place with .bak backups.
 
@@ -35,7 +37,8 @@ struct TexFile {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tex_path = common::input_path_arg("main.tex");
+    let tex_path = common::input_path_arg("main.tex [--no-delete]");
+    let no_delete = common::has_flag("--no-delete");
     let tex_files = collect_tex_files(&tex_path)?;
     let bib_paths = find_bib_files(&tex_files);
 
@@ -58,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut used_keys = HashSet::new();
-    let mut keep_all = false;
+    let mut keep_all = no_delete;
 
     for tex_file in &tex_files {
         let (file_used_keys, file_keep_all) = collect_used_citation_keys(&tex_file.content);
@@ -98,19 +101,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut kept: Vec<usize> = kept_reps.iter().copied().collect();
     kept.sort_by_key(|&i| (entries[i].file_idx, i));
 
-    let mut new_for_rep: HashMap<usize, String> = HashMap::new();
-    let mut used_new_keys: HashSet<String> = HashSet::new();
-
-    for &i in &kept {
-        let base = make_new_key(&entries[i]);
-        let unique = unique_key(base, &mut used_new_keys);
-        new_for_rep.insert(i, unique);
-    }
+    let (kept, new_for_rep, merged_into) = assign_keys(&entries, &kept);
 
     let mut old_to_new: HashMap<String, String> = HashMap::new();
     let mut new_key_year: HashMap<String, i32> = HashMap::new();
 
     for (old, rep) in &rep_for_old {
+        let rep = merged_into.get(rep).unwrap_or(rep);
         if let Some(new_key) = new_for_rep.get(rep) {
             old_to_new.insert(old.clone(), new_key.clone());
         }
@@ -722,6 +719,52 @@ fn render_bib_files(
     out
 }
 
+/// Final dedup pass: run after the keys are normalized, so entries that only
+/// differ in spelling (author order, punctuation, casing) and therefore end up
+/// with the same key and the same title collapse into one.
+fn assign_keys(
+    entries: &[BibEntry],
+    kept: &[usize],
+) -> (Vec<usize>, HashMap<usize, String>, HashMap<usize, usize>) {
+    let mut new_for_rep: HashMap<usize, String> = HashMap::new();
+    let mut merged_into: HashMap<usize, usize> = HashMap::new();
+    let mut used_new_keys: HashSet<String> = HashSet::new();
+    let mut by_base: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut out = Vec::new();
+
+    for &i in kept {
+        let base = make_new_key(&entries[i]);
+
+        let dup = by_base.get(&base).and_then(|group| {
+            group
+                .iter()
+                .copied()
+                .find(|&j| same_title(&entries[j], &entries[i]))
+        });
+
+        if let Some(first) = dup {
+            merged_into.insert(i, first);
+            continue;
+        }
+
+        by_base.entry(base.clone()).or_default().push(i);
+        new_for_rep.insert(i, unique_key(base, &mut used_new_keys));
+        out.push(i);
+    }
+
+    (out, new_for_rep, merged_into)
+}
+
+// ponytail: same normalized title is enough to call it the same work here, the
+// key already pins author and year. Compare more fields (doi, pages) if that
+// ever merges two distinct papers.
+fn same_title(a: &BibEntry, b: &BibEntry) -> bool {
+    let ta = a.fields.get("title").map(|s| latex_plain(s)).unwrap_or_default();
+    let tb = b.fields.get("title").map(|s| latex_plain(s)).unwrap_or_default();
+
+    !ta.is_empty() && ta == tb
+}
+
 fn entry_signature(e: &BibEntry) -> String {
     let author = e
         .fields
@@ -1055,4 +1098,40 @@ fn find_matching(s: &str, open_idx: usize, open: u8, close: u8) -> Option<usize>
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(key: &str, author: &str, title: &str, year: &str) -> BibEntry {
+        let mut fields = HashMap::new();
+        fields.insert("author".to_string(), author.to_string());
+        fields.insert("title".to_string(), title.to_string());
+        fields.insert("year".to_string(), year.to_string());
+
+        BibEntry {
+            file_idx: 0,
+            kind: "article".to_string(),
+            old_key: key.to_string(),
+            body: String::new(),
+            fields,
+        }
+    }
+
+    #[test]
+    fn duplicates_are_merged_after_keys_are_normalized() {
+        let entries = vec![
+            entry("a", "Smith, John", "Quantum Things", "2020"),
+            entry("b", "John Smith", "Quantum things.", "2020"),
+            entry("c", "Smith, John", "Quantum Widgets", "2020"),
+        ];
+
+        let (kept, new_for_rep, merged_into) = assign_keys(&entries, &[0, 1, 2]);
+
+        assert_eq!(kept, vec![0, 2]);
+        assert_eq!(merged_into.get(&1), Some(&0));
+        assert_eq!(new_for_rep[&0], "smith_quantum_2020");
+        assert_eq!(new_for_rep[&2], "smith_quantum_2020_2");
+    }
 }

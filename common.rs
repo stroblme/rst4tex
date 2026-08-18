@@ -6,17 +6,22 @@ use std::{
 pub fn input_path_arg(usage: &str) -> PathBuf {
     let mut args = env::args();
     let program = args.next().unwrap_or_else(|| "program".to_string());
-    let Some(input_path) = args.next() else {
+    let mut positional = args.filter(|a| !a.starts_with("--"));
+    let Some(input_path) = positional.next() else {
         eprintln!("Usage: {program} {usage}");
         std::process::exit(2);
     };
 
-    if args.next().is_some() {
+    if positional.next().is_some() {
         eprintln!("Usage: {program} {usage}");
         std::process::exit(2);
     }
 
     PathBuf::from(input_path)
+}
+
+pub fn has_flag(name: &str) -> bool {
+    env::args().any(|a| a == name)
 }
 
 pub fn write_with_backup(path: &Path, content: &str) -> io::Result<()> {

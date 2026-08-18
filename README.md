@@ -3,7 +3,8 @@
 A collection of (opinionated) tools written in Rust to improve code quality of a LaTeX document.
 
 - **fixbib**: scans a given LaTeX document and its `\include{}` files for bibliography files and
-  - removes duplicates
+  - removes duplicates (also those that only become visible once the citation keys are unified)
+  - removes unused references (unless `--no-delete` is given)
   - sorts references by date when using multi-citations
   - unifies citation keys to `[auth:lower][veryshorttitle:lower][year]`
   - updates bibliography files and rewrites document citations
@@ -39,6 +40,7 @@ fixtex main.tex
 **fixbib**
 ```bash
 fixbib main.tex
+fixbib main.tex --no-delete  # keep references that are not cited anywhere
 ```
 
 Both tools read the LaTeX document from the given path and update files in place.
