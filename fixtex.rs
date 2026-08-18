@@ -51,13 +51,49 @@ fn process(input: &str) -> String {
         base_indent: String::new(),
     };
 
-    for raw_line in input.lines() {
+    let mut lines = input.lines();
+
+    while let Some(raw_line) = lines.next() {
         if let Some(mode) = display_math {
             let line = format_delimiter_line(raw_line, &mut delimiter_state);
             append_line(&mut out, &line);
             if display_math_ends(raw_line, mode) {
                 display_math = None;
             }
+            continue;
+        }
+
+        if delimiter_state.depth == 0 && caption_body_start(raw_line.trim_start()).is_some() {
+            let mut block = vec![raw_line.to_string()];
+            let mut joined = collapse_whitespace(raw_line);
+
+            while caption_body_end(&joined).is_none() {
+                let Some(next) = lines.next() else { break };
+                joined = format!("{joined} {}", collapse_whitespace(next));
+                block.push(next.to_string());
+            }
+
+            flush_paragraph(&mut out, &mut para);
+
+            // ponytail: joining is only safe for plain caption text; anything with a comment
+            // or a nested environment is passed through untouched.
+            let joinable = caption_body_end(&joined).is_some()
+                && !block
+                    .iter()
+                    .any(|l| contains_unescaped_percent(l) || !env_commands_in_line(l).is_empty());
+
+            if joinable {
+                let (line, _) = format_environment_line(&joined, &mut env_stack);
+                for line in format_caption(&line) {
+                    append_line(&mut out, &line);
+                }
+            } else {
+                for raw in &block {
+                    let (line, _) = format_environment_line(raw, &mut env_stack);
+                    append_line(&mut out, &line);
+                }
+            }
+
             continue;
         }
 
@@ -118,6 +154,116 @@ fn process(input: &str) -> String {
 
     flush_paragraph(&mut out, &mut para);
     out
+}
+
+/// Byte index just past the opening brace of `\caption{`, `\caption*[short]{`, ... .
+fn caption_body_start(s: &str) -> Option<usize> {
+    const COMMANDS: &[&str] = &[r"\caption", r"\subcaption"];
+
+    let command = COMMANDS.iter().find(|c| starts_command(s, c))?;
+    let mut idx = command.len();
+
+    if s[idx..].starts_with('*') {
+        idx += 1;
+    }
+
+    idx = skip_ws(s, idx);
+
+    if s[idx..].starts_with('[') {
+        idx = skip_group(s, idx)?;
+        idx = skip_ws(s, idx);
+    }
+
+    if !s[idx..].starts_with('{') {
+        return None;
+    }
+
+    Some(idx + 1)
+}
+
+/// Byte index just past the closing brace of the caption body, if it is complete.
+fn caption_body_end(s: &str) -> Option<usize> {
+    let trimmed = s.trim_start();
+    let body_start = caption_body_start(trimmed)?;
+    skip_group(trimmed, body_start - 1)
+}
+
+/// Byte index just past the delimiter matching the one at `start`.
+fn skip_group(s: &str, start: usize) -> Option<usize> {
+    let open = s[start..].chars().next()?;
+    let close = match open {
+        '[' => ']',
+        '{' => '}',
+        '(' => ')',
+        _ => return None,
+    };
+
+    let mut depth = 0usize;
+    let mut idx = start;
+
+    while idx < s.len() {
+        let c = s[idx..].chars().next().unwrap();
+
+        if c == '\\' {
+            idx = skip_escaped_token(s, idx)?;
+            continue;
+        }
+
+        idx += c.len_utf8();
+
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+    }
+
+    None
+}
+
+fn format_caption(line: &str) -> Vec<String> {
+    let indent = leading_ws(line);
+    let trimmed = line.trim_start();
+
+    let Some(body_start) = caption_body_start(trimmed) else {
+        return vec![line.to_string()];
+    };
+
+    let Some(body_end) = skip_group(trimmed, body_start - 1) else {
+        return vec![line.to_string()];
+    };
+
+    let head = &trimmed[..body_start];
+    let body = collapse_whitespace(&trimmed[body_start..body_end - 1]);
+    let tail = &trimmed[body_end..];
+    let sentences = split_sentences(&body);
+
+    if sentences.len() <= 1 {
+        return vec![format!("{indent}{head}{body}}}{tail}")];
+    }
+
+    sentences
+        .iter()
+        .enumerate()
+        .map(|(i, sentence)| {
+            let mut out = if i == 0 {
+                format!("{indent}{head}{sentence}")
+            } else {
+                format!("{indent}{ENV_INDENT}{sentence}")
+            };
+
+            if i + 1 == sentences.len() {
+                out.push('}');
+                out.push_str(tail);
+            }
+
+            out
+        })
+        .collect()
 }
 
 fn format_environment_line(line: &str, env_stack: &mut Vec<EnvState>) -> (String, bool) {
@@ -790,4 +936,25 @@ fn take_paragraph_prefix(s: &str) -> Option<(String, String, String)> {
     }
 
     None
+}
+#[cfg(test)]
+mod tests {
+    use super::process;
+
+    #[test]
+    fn caption_is_split_into_sentences() {
+        let input = "\\begin{figure}\n\\caption[Short]{One. Two,\ni.e. still two.}\\label{f}\n\\end{figure}\n";
+        let expected = "\\begin{figure}\n  \\caption[Short]{One.\n    Two, i.e. still two.}\\label{f}\n\\end{figure}\n";
+        assert_eq!(process(input), expected);
+        assert_eq!(process(&process(input)), expected);
+    }
+
+    #[test]
+    fn single_sentence_caption_stays_on_one_line() {
+        let input = "\\begin{figure}\n\\caption{A caption \\textbf{with a group}}\n\\end{figure}\n";
+        assert_eq!(
+            process(input),
+            "\\begin{figure}\n  \\caption{A caption \\textbf{with a group}}\n\\end{figure}\n"
+        );
+    }
 }

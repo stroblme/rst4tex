@@ -11,6 +11,7 @@ A collection of (opinionated) tools written in Rust to improve code quality of a
   - all the basic formatting rules (double white- and trailing whitespaces, double return lines, etc.)
   - add a new line after each sentence (or removing a new line if a sentence continues)
   - add proper indentions to each environment (except `document` and `section`s)
+  - split multi-sentence `\caption{}` (and `\subcaption{}`) bodies one sentence per line
 
 Note: adding a new line after each sentence naturally can cause lines to be longer than the common 88 chars.
 
