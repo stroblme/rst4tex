@@ -2,7 +2,7 @@
 
 A collection of (opinionated) tools written in Rust to improve code quality of a LaTeX document.
 
-- **fixbib**: scans a given LaTeX document and its `\include{}` files for bibliography files and
+- **fixbib**: scans a given LaTeX document and its `\include{}`, `\input{}` and `\subfile{}` files for bibliography files and
   - removes duplicates (also those that only become visible once the citation keys are unified)
   - removes unused references (unless `--no-delete` is given)
   - sorts references by date when using multi-citations
@@ -18,15 +18,16 @@ Note: adding a new line after each sentence naturally can cause lines to be long
 
 ## Install
 
-No binaries are available yet, so you need to clone this repository first.
-There is a makefile available to build and install these scripts.
-Just run
+Requires `rustc`, `make`, `curl` and `tar`.
 
 ```bash
-make
+curl -fsSL https://raw.githubusercontent.com/stroblme/rst4tex/main/install.sh | sh
 ```
 
-to have the compiled binaries available in `$HOME/.local/bin`.
+This builds `fixtex` and `fixbib` and installs them to `$HOME/.local/bin`
+(override with `INSTALL_DIR=/somewhere/else`, pick a branch or tag with `REF=v1.0`).
+
+Or clone the repository and run `make`, which does the same thing.
 
 ## Usage
 
