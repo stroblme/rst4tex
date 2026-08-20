@@ -212,7 +212,15 @@ fn collect_tex_files_inner(
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(path)?;
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if !out.is_empty() => {
+            eprintln!("Warning: skipping {}: {}", path.display(), e);
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
     let included_paths = find_include_tex_files(&content, path);
 
     out.push(TexFile {
@@ -273,17 +281,19 @@ fn find_include_tex_files(tex: &str, tex_path: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for content in find_command_brace_args(tex, "include") {
-        let name = content.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let mut p = base_dir.join(name);
-        if p.extension().is_none() {
-            p.set_extension("tex");
-        }
-        if seen.insert(path_identity(&p)) {
-            out.push(p);
+    for cmd in ["include", "input", "subfile"] {
+        for content in find_command_brace_args(tex, cmd) {
+            let name = content.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let mut p = base_dir.join(name);
+            if p.extension().is_none() {
+                p.set_extension("tex");
+            }
+            if seen.insert(path_identity(&p)) {
+                out.push(p);
+            }
         }
     }
 
@@ -1117,6 +1127,17 @@ mod tests {
             body: String::new(),
             fields,
         }
+    }
+
+    #[test]
+    fn input_and_subfile_children_are_followed() {
+        let tex = "\\input{figures/pipeline}\n\\subfile{chap}\n\\includegraphics{img.png}\n";
+        let found = find_include_tex_files(tex, Path::new("main.tex"));
+
+        assert_eq!(
+            found,
+            vec![PathBuf::from("figures/pipeline.tex"), PathBuf::from("chap.tex")]
+        );
     }
 
     #[test]
