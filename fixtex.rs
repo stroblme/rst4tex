@@ -45,6 +45,7 @@ fn process(input: &str) -> String {
     let mut out = String::new();
     let mut para: Vec<String> = Vec::new();
     let mut display_math: Option<MathMode> = None;
+    let mut verbatim: Option<String> = None;
     let mut env_stack: Vec<EnvState> = Vec::new();
     let mut delimiter_state = DelimiterState {
         depth: 0,
@@ -54,12 +55,32 @@ fn process(input: &str) -> String {
     let mut lines = input.lines();
 
     while let Some(raw_line) = lines.next() {
+        if let Some(name) = &verbatim {
+            if !ends_env(raw_line, name) {
+                append_line(&mut out, raw_line);
+                continue;
+            }
+
+            verbatim = None;
+            let (line, _) = format_environment_line(raw_line, &mut env_stack);
+            append_line(&mut out, &line);
+            continue;
+        }
+
         if let Some(mode) = display_math {
             let line = format_delimiter_line(raw_line, &mut delimiter_state);
             append_line(&mut out, &line);
             if display_math_ends(raw_line, mode) {
                 display_math = None;
             }
+            continue;
+        }
+
+        if let Some(name) = verbatim_env_start(raw_line) {
+            flush_paragraph(&mut out, &mut para);
+            let (line, _) = format_environment_line(raw_line, &mut env_stack);
+            append_line(&mut out, &line);
+            verbatim = Some(name);
             continue;
         }
 
@@ -337,6 +358,38 @@ fn pop_env(env_stack: &mut Vec<EnvState>, end_name: &str) {
     } else {
         env_stack.pop();
     }
+}
+
+/// Environments whose body is reproduced verbatim, so we must not touch its indentation.
+fn is_verbatim_env(env: &str) -> bool {
+    matches!(
+        env,
+        "lstlisting" | "verbatim" | "Verbatim" | "minted" | "alltt" | "listing"
+    )
+}
+
+/// Name of the verbatim environment opened, and not closed again, on this line.
+fn verbatim_env_start(line: &str) -> Option<String> {
+    let commands = env_commands_in_line(line);
+    let begin = commands
+        .iter()
+        .rposition(|cmd| cmd.kind == EnvCommandKind::Begin && is_verbatim_env(&cmd.name))?;
+    let name = &commands[begin].name;
+
+    if commands[begin + 1..]
+        .iter()
+        .any(|cmd| cmd.kind == EnvCommandKind::End && &cmd.name == name)
+    {
+        return None;
+    }
+
+    Some(name.clone())
+}
+
+fn ends_env(line: &str, name: &str) -> bool {
+    env_commands_in_line(line)
+        .iter()
+        .any(|cmd| cmd.kind == EnvCommandKind::End && cmd.name == name)
 }
 
 fn is_list_env(env: &str) -> bool {
