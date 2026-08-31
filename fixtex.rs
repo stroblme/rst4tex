@@ -45,7 +45,6 @@ fn process(input: &str) -> String {
     let mut out = String::new();
     let mut para: Vec<String> = Vec::new();
     let mut display_math: Option<MathMode> = None;
-    let mut verbatim: Option<String> = None;
     let mut env_stack: Vec<EnvState> = Vec::new();
     let mut delimiter_state = DelimiterState {
         depth: 0,
@@ -55,18 +54,6 @@ fn process(input: &str) -> String {
     let mut lines = input.lines();
 
     while let Some(raw_line) = lines.next() {
-        if let Some(name) = &verbatim {
-            if !ends_env(raw_line, name) {
-                append_line(&mut out, raw_line);
-                continue;
-            }
-
-            verbatim = None;
-            let (line, _) = format_environment_line(raw_line, &mut env_stack);
-            append_line(&mut out, &line);
-            continue;
-        }
-
         if let Some(mode) = display_math {
             let line = format_delimiter_line(raw_line, &mut delimiter_state);
             append_line(&mut out, &line);
@@ -78,9 +65,31 @@ fn process(input: &str) -> String {
 
         if let Some(name) = verbatim_env_start(raw_line) {
             flush_paragraph(&mut out, &mut para);
-            let (line, _) = format_environment_line(raw_line, &mut env_stack);
-            append_line(&mut out, &line);
-            verbatim = Some(name);
+
+            let (begin, _) = format_environment_line(raw_line, &mut env_stack);
+            let indent = leading_ws(&begin).to_string();
+            append_line(&mut out, &begin);
+
+            let mut body: Vec<&str> = Vec::new();
+            let mut end = None;
+
+            for next in lines.by_ref() {
+                if ends_env(next, &name) {
+                    end = Some(next);
+                    break;
+                }
+                body.push(next);
+            }
+
+            for line in reindent_block(&body, &indent) {
+                append_line(&mut out, &line);
+            }
+
+            if let Some(end) = end {
+                let (line, _) = format_environment_line(end, &mut env_stack);
+                append_line(&mut out, &line);
+            }
+
             continue;
         }
 
@@ -384,6 +393,29 @@ fn verbatim_env_start(line: &str) -> Option<String> {
     }
 
     Some(name.clone())
+}
+
+/// Pad a verbatim body out to `indent` as one block. Indentation inside the body is the
+/// author's, so it is only ever shifted right, never stripped.
+fn reindent_block(lines: &[&str], indent: &str) -> Vec<String> {
+    let common = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| leading_ws(line).len())
+        .min()
+        .unwrap_or(0);
+    let pad = " ".repeat(indent.len().saturating_sub(common));
+
+    lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{pad}{line}")
+            }
+        })
+        .collect()
 }
 
 fn ends_env(line: &str, name: &str) -> bool {
@@ -998,6 +1030,20 @@ mod tests {
     fn caption_is_split_into_sentences() {
         let input = "\\begin{figure}\n\\caption[Short]{One. Two,\ni.e. still two.}\\label{f}\n\\end{figure}\n";
         let expected = "\\begin{figure}\n  \\caption[Short]{One.\n    Two, i.e. still two.}\\label{f}\n\\end{figure}\n";
+        assert_eq!(process(input), expected);
+        assert_eq!(process(&process(input)), expected);
+    }
+
+    #[test]
+    fn lstlisting_body_keeps_its_own_indentation() {
+        let input = "\\begin{lstlisting}[language=Python]\n  def f(w):\n    return w\n\n  g = f\n\\end{lstlisting}\n";
+        assert_eq!(process(input), input);
+    }
+
+    #[test]
+    fn nested_lstlisting_body_is_padded_as_one_block() {
+        let input = "\\begin{figure}\n\\begin{lstlisting}\ndef f(w):\n    return w\n\\end{lstlisting}\n\\end{figure}\n";
+        let expected = "\\begin{figure}\n  \\begin{lstlisting}\n  def f(w):\n      return w\n  \\end{lstlisting}\n\\end{figure}\n";
         assert_eq!(process(input), expected);
         assert_eq!(process(&process(input)), expected);
     }
