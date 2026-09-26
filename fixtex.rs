@@ -299,7 +299,7 @@ fn format_caption(line: &str) -> Vec<String> {
 fn format_environment_line(line: &str, env_stack: &mut Vec<EnvState>) -> (String, bool) {
     let trimmed = line.trim_start();
 
-    let env_commands = env_commands_in_line(trimmed);
+    let env_commands = env_commands_in_line(strip_comment(trimmed));
 
     let was_in_env = !env_stack.is_empty();
     let is_env_line = was_in_env || env_commands.first().map(|cmd| cmd.start == 0).unwrap_or(false);
@@ -379,7 +379,7 @@ fn is_verbatim_env(env: &str) -> bool {
 
 /// Name of the verbatim environment opened, and not closed again, on this line.
 fn verbatim_env_start(line: &str) -> Option<String> {
-    let commands = env_commands_in_line(line);
+    let commands = env_commands_in_line(strip_comment(line));
     let begin = commands
         .iter()
         .rposition(|cmd| cmd.kind == EnvCommandKind::Begin && is_verbatim_env(&cmd.name))?;
@@ -937,20 +937,25 @@ fn display_math_ends_after_start(line: &str, mode: MathMode) -> bool {
 }
 
 fn contains_unescaped_percent(line: &str) -> bool {
+    strip_comment(line).len() < line.len()
+}
+
+/// `line` up to its first unescaped `%`.
+fn strip_comment(line: &str) -> &str {
     let mut backslashes = 0usize;
 
-    for c in line.chars() {
+    for (i, c) in line.char_indices() {
         if c == '\\' {
             backslashes += 1;
         } else {
             if c == '%' && backslashes % 2 == 0 {
-                return true;
+                return &line[..i];
             }
             backslashes = 0;
         }
     }
 
-    false
+    line
 }
 
 fn is_command_barrier(line: &str) -> bool {
@@ -1049,6 +1054,13 @@ mod tests {
         let expected = "\\begin{figure}\n  \\begin{lstlisting}\n  def f(w):\n      return w\n  \\end{lstlisting}\n\\end{figure}\n";
         assert_eq!(process(input), expected);
         assert_eq!(process(&process(input)), expected);
+    }
+
+    #[test]
+    fn commented_out_environments_are_ignored() {
+        let input = "\\begin{itemize}\n% \\begin{enumerate}\n\\item A.\n\\end{itemize}\n% \\begin{lstlisting}\nOne.   Two.\n";
+        let expected = "\\begin{itemize}\n  % \\begin{enumerate}\n  \\item A.\n\\end{itemize}\n% \\begin{lstlisting}\nOne.\nTwo.\n";
+        assert_eq!(process(input), expected);
     }
 
     #[test]

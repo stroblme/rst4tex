@@ -38,7 +38,7 @@ struct TexFile {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tex_path = common::input_path_arg("main.tex [--no-delete]");
-    let no_delete = common::has_flag("--no-delete");
+    let no_delete = std::env::args().any(|a| a == "--no-delete");
     let root_dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
     let tex_files = collect_tex_files(&tex_path)?;
     let bib_paths = find_bib_files(&tex_files, root_dir);
@@ -318,7 +318,29 @@ fn path_identity(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// `tex` with every comment blanked out by spaces, so byte offsets still match `tex`.
+// ponytail: `%` inside \verb or verbatim environments is treated as a comment too.
+fn mask_comments(tex: &str) -> String {
+    let mut b = tex.as_bytes().to_vec();
+    let mut i = 0;
+
+    while i < b.len() {
+        if b[i] == b'\\' {
+            i += 1;
+        } else if b[i] == b'%' {
+            while i < b.len() && b[i] != b'\n' {
+                b[i] = b' ';
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+
+    String::from_utf8(b).expect("comments are blanked from '%' to newline, whole chars only")
+}
+
 fn find_command_brace_args(tex: &str, target: &str) -> Vec<String> {
+    let tex = &mask_comments(tex);
     let mut out = Vec::new();
     let b = tex.as_bytes();
     let mut i = 0;
@@ -538,6 +560,7 @@ fn parse_fields(body: &str) -> HashMap<String, String> {
 }
 
 fn collect_used_citation_keys(tex: &str) -> (HashSet<String>, bool) {
+    let tex = &mask_comments(tex);
     let mut used = HashSet::new();
     let mut keep_all = false;
     let b = tex.as_bytes();
@@ -581,7 +604,8 @@ fn rewrite_tex_citations(
     new_key_year: &HashMap<String, i32>,
 ) -> String {
     let mut out = String::new();
-    let b = tex.as_bytes();
+    let code = mask_comments(tex);
+    let b = code.as_bytes();
     let mut i = 0;
     let mut last = 0;
 
@@ -591,8 +615,8 @@ fn rewrite_tex_citations(
             continue;
         }
 
-        if let Some((cmd, s, e)) = cite_group_at(tex, i) {
-            let old_group = &tex[s..e];
+        if let Some((cmd, s, e)) = cite_group_at(&code, i) {
+            let old_group = &code[s..e];
 
             let mut keys: Vec<String> = old_group
                 .split(',')
@@ -1152,6 +1176,21 @@ mod tests {
             found,
             vec![PathBuf::from("figures/pipeline.tex"), PathBuf::from("chap.tex")]
         );
+    }
+
+    #[test]
+    fn commented_out_commands_are_ignored() {
+        let tex = "% \\input{gone}\n\\input{kept} % \\cite{b}\n50\\% \\cite{a,% old\n c}\n";
+
+        let found = find_include_tex_files(tex, Path::new("main.tex"), Path::new(""));
+        assert_eq!(found, vec![PathBuf::from("kept.tex")]);
+
+        let (used, _) = collect_used_citation_keys(tex);
+        assert_eq!(used, HashSet::from(["a".to_string(), "c".to_string()]));
+
+        let map = HashMap::from([("a".to_string(), "x".to_string()), ("b".to_string(), "y".to_string())]);
+        let out = rewrite_tex_citations(tex, &map, &HashMap::new());
+        assert_eq!(out, "% \\input{gone}\n\\input{kept} % \\cite{b}\n50\\% \\cite{x,c}\n");
     }
 
     #[test]

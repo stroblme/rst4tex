@@ -20,10 +20,6 @@ pub fn input_path_arg(usage: &str) -> PathBuf {
     PathBuf::from(input_path)
 }
 
-pub fn has_flag(name: &str) -> bool {
-    env::args().any(|a| a == name)
-}
-
 pub fn write_with_backup(path: &Path, content: &str) -> io::Result<()> {
     let backup = backup_path(path);
 
