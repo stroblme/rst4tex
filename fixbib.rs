@@ -39,8 +39,9 @@ struct TexFile {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tex_path = common::input_path_arg("main.tex [--no-delete]");
     let no_delete = common::has_flag("--no-delete");
+    let root_dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
     let tex_files = collect_tex_files(&tex_path)?;
-    let bib_paths = find_bib_files(&tex_files);
+    let bib_paths = find_bib_files(&tex_files, root_dir);
 
     if bib_paths.is_empty() {
         eprintln!(
@@ -197,12 +198,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn collect_tex_files(root_path: &Path) -> std::io::Result<Vec<TexFile>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    collect_tex_files_inner(root_path, &mut seen, &mut out)?;
+    let root_dir = root_path.parent().unwrap_or_else(|| Path::new("."));
+    collect_tex_files_inner(root_path, root_dir, &mut seen, &mut out)?;
     Ok(out)
 }
 
 fn collect_tex_files_inner(
     path: &Path,
+    root_dir: &Path,
     seen: &mut HashSet<PathBuf>,
     out: &mut Vec<TexFile>,
 ) -> std::io::Result<()> {
@@ -221,7 +224,7 @@ fn collect_tex_files_inner(
         Err(e) => return Err(e),
     };
 
-    let included_paths = find_include_tex_files(&content, path);
+    let included_paths = find_include_tex_files(&content, path, root_dir);
 
     out.push(TexFile {
         path: path.to_path_buf(),
@@ -229,13 +232,13 @@ fn collect_tex_files_inner(
     });
 
     for included_path in included_paths {
-        collect_tex_files_inner(&included_path, seen, out)?;
+        collect_tex_files_inner(&included_path, root_dir, seen, out)?;
     }
 
     Ok(())
 }
 
-fn find_bib_files(tex_files: &[TexFile]) -> Vec<PathBuf> {
+fn find_bib_files(tex_files: &[TexFile], root_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -248,10 +251,7 @@ fn find_bib_files(tex_files: &[TexFile]) -> Vec<PathBuf> {
                 if name.is_empty() {
                     continue;
                 }
-                let mut p = base_dir.join(name);
-                if p.extension().is_none() {
-                    p.set_extension("bib");
-                }
+                let p = resolve_path(name, "bib", root_dir, base_dir);
                 if seen.insert(path_identity(&p)) {
                     out.push(p);
                 }
@@ -263,10 +263,7 @@ fn find_bib_files(tex_files: &[TexFile]) -> Vec<PathBuf> {
             if name.is_empty() {
                 continue;
             }
-            let mut p = base_dir.join(name);
-            if p.extension().is_none() {
-                p.set_extension("bib");
-            }
+            let p = resolve_path(name, "bib", root_dir, base_dir);
             if seen.insert(path_identity(&p)) {
                 out.push(p);
             }
@@ -276,7 +273,7 @@ fn find_bib_files(tex_files: &[TexFile]) -> Vec<PathBuf> {
     out
 }
 
-fn find_include_tex_files(tex: &str, tex_path: &Path) -> Vec<PathBuf> {
+fn find_include_tex_files(tex: &str, tex_path: &Path, root_dir: &Path) -> Vec<PathBuf> {
     let base_dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -287,10 +284,7 @@ fn find_include_tex_files(tex: &str, tex_path: &Path) -> Vec<PathBuf> {
             if name.is_empty() {
                 continue;
             }
-            let mut p = base_dir.join(name);
-            if p.extension().is_none() {
-                p.set_extension("tex");
-            }
+            let p = resolve_path(name, "tex", root_dir, base_dir);
             if seen.insert(path_identity(&p)) {
                 out.push(p);
             }
@@ -298,6 +292,26 @@ fn find_include_tex_files(tex: &str, tex_path: &Path) -> Vec<PathBuf> {
     }
 
     out
+}
+
+// LaTeX resolves paths against the main file's directory (the compile dir), not the
+// including file's. Fall back to the including file's dir for subfiles/import layouts.
+fn resolve_path(name: &str, ext: &str, root_dir: &Path, file_dir: &Path) -> PathBuf {
+    let with_ext = |dir: &Path| {
+        let mut p = dir.join(name);
+        if p.extension().is_none() {
+            p.set_extension(ext);
+        }
+        p
+    };
+    let from_root = with_ext(root_dir);
+    let from_file = with_ext(file_dir);
+
+    if !from_root.exists() && from_file.exists() {
+        from_file
+    } else {
+        from_root
+    }
 }
 
 fn path_identity(path: &Path) -> PathBuf {
@@ -1132,12 +1146,25 @@ mod tests {
     #[test]
     fn input_and_subfile_children_are_followed() {
         let tex = "\\input{figures/pipeline}\n\\subfile{chap}\n\\includegraphics{img.png}\n";
-        let found = find_include_tex_files(tex, Path::new("main.tex"));
+        let found = find_include_tex_files(tex, Path::new("main.tex"), Path::new(""));
 
         assert_eq!(
             found,
             vec![PathBuf::from("figures/pipeline.tex"), PathBuf::from("chap.tex")]
         );
+    }
+
+    #[test]
+    fn nested_inputs_resolve_against_main_dir() {
+        let dir = std::env::temp_dir().join(format!("fixbib-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::create_dir_all(dir.join("c")).unwrap();
+        std::fs::write(dir.join("b/a.tex"), "").unwrap();
+
+        let found = find_include_tex_files("\\input{b/a}", &dir.join("c/a.tex"), &dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(found, vec![dir.join("b/a.tex")]);
     }
 
     #[test]

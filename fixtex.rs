@@ -617,14 +617,17 @@ fn is_abbreviation(s: &str, dot_byte: usize) -> bool {
         return true;
     }
 
-    // Catches initials like "A. Einstein".
-    let letters: String = token.chars().filter(|c| c.is_alphabetic()).collect();
-    letters.chars().count() == 1
-        && letters
-            .chars()
-            .next()
-            .map(|c| c.is_uppercase())
-            .unwrap_or(false)
+    // Catches initials like "A. Einstein": a lone capital letter directly
+    // before the dot (so "$= I$." does not match), never the pronoun "I",
+    // and not the last item of a list like "see A, B.".
+    // ponytail: "B. The next" vs "B. Smith" stays undecidable; add a
+    // surname check if it bites.
+    let mut words = prefix.split_whitespace().rev();
+    let last = words.next().unwrap_or("");
+    let before = words.next().unwrap_or("");
+    let mut cs = last.chars();
+    matches!((cs.next(), cs.next()), (Some(c), None) if c.is_uppercase() && c != 'I')
+        && !before.ends_with(',')
 }
 
 fn is_dotted_abbreviation(token: &str) -> bool {
@@ -1046,6 +1049,16 @@ mod tests {
         let expected = "\\begin{figure}\n  \\begin{lstlisting}\n  def f(w):\n      return w\n  \\end{lstlisting}\n\\end{figure}\n";
         assert_eq!(process(input), expected);
         assert_eq!(process(&process(input)), expected);
+    }
+
+    #[test]
+    fn lone_capital_before_period_ends_sentence() {
+        for tail in ["$= I$.", "text I.", "see A, B.", "$= II$.", "\\emph{here}."] {
+            let input = format!("Both {tail}\nThe next sentence.\n");
+            assert_eq!(process(&input), input, "{tail}");
+        }
+        let input = "Written by A. Einstein\nlast year.\n";
+        assert_eq!(process(input), "Written by A. Einstein last year.\n");
     }
 
     #[test]
