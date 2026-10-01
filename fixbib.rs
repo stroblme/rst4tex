@@ -61,14 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entries.append(&mut file_entries);
     }
 
-    let mut used_keys = HashSet::new();
-    let mut keep_all = no_delete;
-
-    for tex_file in &tex_files {
-        let (file_used_keys, file_keep_all) = collect_used_citation_keys(&tex_file.content);
-        used_keys.extend(file_used_keys);
-        keep_all |= file_keep_all;
-    }
+    let used_keys: HashSet<String> = citation_order(&tex_files, root_dir).into_iter().collect();
+    let keep_all = no_delete || used_keys.contains("*");
 
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
@@ -102,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut kept: Vec<usize> = kept_reps.iter().copied().collect();
     kept.sort_by_key(|&i| (entries[i].file_idx, i));
 
-    let (kept, new_for_rep, merged_into) = assign_keys(&entries, &kept);
+    let (mut kept, new_for_rep, merged_into) = assign_keys(&entries, &kept);
 
     let mut old_to_new: HashMap<String, String> = HashMap::new();
     let mut new_key_year: HashMap<String, i32> = HashMap::new();
@@ -123,21 +117,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let new_tex_files: Vec<_> = tex_files
         .iter()
-        .map(|tf| {
-            (
-                tf.path.clone(),
-                rewrite_tex_citations(&tf.content, &old_to_new, &new_key_year),
-            )
+        .map(|tf| TexFile {
+            path: tf.path.clone(),
+            content: rewrite_tex_citations(&tf.content, &old_to_new, &new_key_year),
         })
         .collect();
+
+    // Order entries by first citation in the rewritten document. rev() so the first
+    // occurrence wins; uncited entries stay at the end in their old order (stable sort).
+    let first_cite: HashMap<String, usize> = citation_order(&new_tex_files, root_dir)
+        .into_iter()
+        .enumerate()
+        .rev()
+        .map(|(pos, key)| (key, pos))
+        .collect();
+    kept.sort_by_key(|i| first_cite.get(&new_for_rep[i]).copied().unwrap_or(usize::MAX));
+
     let new_bibs = render_bib_files(&bib_files, &entries, &kept, &new_for_rep);
 
     for (path, content) in new_bibs {
         common::write_with_backup(&path, &content)?;
     }
 
-    for (path, content) in new_tex_files {
-        common::write_with_backup(&path, &content)?;
+    for tf in new_tex_files {
+        common::write_with_backup(&tf.path, &tf.content)?;
     }
 
     eprintln!("Found bibliography files:");
@@ -273,12 +276,14 @@ fn find_bib_files(tex_files: &[TexFile], root_dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+const INCLUDE_CMDS: [&str; 3] = ["include", "input", "subfile"];
+
 fn find_include_tex_files(tex: &str, tex_path: &Path, root_dir: &Path) -> Vec<PathBuf> {
     let base_dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for cmd in ["include", "input", "subfile"] {
+    for cmd in INCLUDE_CMDS {
         for content in find_command_brace_args(tex, cmd) {
             let name = content.trim();
             if name.is_empty() {
@@ -559,10 +564,35 @@ fn parse_fields(body: &str) -> HashMap<String, String> {
     map
 }
 
-fn collect_used_citation_keys(tex: &str) -> (HashSet<String>, bool) {
-    let tex = &mask_comments(tex);
-    let mut used = HashSet::new();
-    let mut keep_all = false;
+/// Cited keys in document order (with repeats): \include, \input and \subfile are
+/// descended into where they occur, starting at the main file `tex_files[0]`.
+fn citation_order(tex_files: &[TexFile], root_dir: &Path) -> Vec<String> {
+    let by_id: HashMap<PathBuf, &TexFile> = tex_files
+        .iter()
+        .map(|tf| (path_identity(&tf.path), tf))
+        .collect();
+    let mut out = Vec::new();
+
+    if let Some(main) = tex_files.first() {
+        citation_order_inner(main, &by_id, root_dir, &mut HashSet::new(), &mut out);
+    }
+
+    out
+}
+
+fn citation_order_inner(
+    tf: &TexFile,
+    by_id: &HashMap<PathBuf, &TexFile>,
+    root_dir: &Path,
+    seen: &mut HashSet<PathBuf>,
+    out: &mut Vec<String>,
+) {
+    if !seen.insert(path_identity(&tf.path)) {
+        return;
+    }
+
+    let tex = &mask_comments(&tf.content);
+    let base_dir = tf.path.parent().unwrap_or_else(|| Path::new("."));
     let b = tex.as_bytes();
     let mut i = 0;
 
@@ -572,30 +602,30 @@ fn collect_used_citation_keys(tex: &str) -> (HashSet<String>, bool) {
             continue;
         }
 
-        if let Some((_cmd, s, e)) = cite_group_at(tex, i) {
-            let group = &tex[s..e];
+        let accept = |c: &str| is_cite_cmd(c) || INCLUDE_CMDS.contains(&c);
 
-            for k in group.split(',') {
-                let key = k.trim();
-
-                if key.is_empty() {
-                    continue;
-                }
-
-                if key == "*" {
-                    keep_all = true;
-                }
-
-                used.insert(key.to_string());
-            }
-
-            i = e + 1;
-        } else {
+        let Some((cmd, s, e)) = command_arg_at(tex, i, accept) else {
             i += 1;
-        }
-    }
+            continue;
+        };
 
-    (used, keep_all)
+        if is_cite_cmd(&cmd) {
+            out.extend(
+                tex[s..e]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(String::from),
+            );
+        } else {
+            let p = resolve_path(tex[s..e].trim(), "tex", root_dir, base_dir);
+            if let Some(child) = by_id.get(&path_identity(&p)) {
+                citation_order_inner(child, by_id, root_dir, seen, out);
+            }
+        }
+
+        i = e + 1;
+    }
 }
 
 fn rewrite_tex_citations(
@@ -615,7 +645,7 @@ fn rewrite_tex_citations(
             continue;
         }
 
-        if let Some((cmd, s, e)) = cite_group_at(&code, i) {
+        if let Some((cmd, s, e)) = command_arg_at(&code, i, is_cite_cmd) {
             let old_group = &code[s..e];
 
             let mut keys: Vec<String> = old_group
@@ -650,7 +680,13 @@ fn rewrite_tex_citations(
     out
 }
 
-fn cite_group_at(tex: &str, pos: usize) -> Option<(String, usize, usize)> {
+/// `(command, arg_start, arg_end)` for a command at `pos` that `accept`s, skipping
+/// a `*` and optional `[...]` arguments before its `{...}` argument.
+fn command_arg_at(
+    tex: &str,
+    pos: usize,
+    accept: fn(&str) -> bool,
+) -> Option<(String, usize, usize)> {
     let b = tex.as_bytes();
 
     if pos >= b.len() || b[pos] != b'\\' {
@@ -670,7 +706,7 @@ fn cite_group_at(tex: &str, pos: usize) -> Option<(String, usize, usize)> {
 
     let cmd = tex[cmd_start..i].to_string();
 
-    if !is_cite_cmd(&cmd) {
+    if !accept(&cmd) {
         return None;
     }
 
@@ -723,7 +759,6 @@ fn render_bib_files(
     kept: &[usize],
     new_for_rep: &HashMap<usize, String>,
 ) -> Vec<(PathBuf, String)> {
-    let kept_set: HashSet<usize> = kept.iter().copied().collect();
     let mut out = Vec::new();
 
     for (file_idx, bf) in bib_files.iter().enumerate() {
@@ -734,30 +769,21 @@ fn render_bib_files(
             s.push_str("\n\n");
         }
 
-        for (i, e) in entries.iter().enumerate() {
-            if e.file_idx != file_idx || !kept_set.contains(&i) {
+        for &i in kept {
+            let e = &entries[i];
+
+            if e.file_idx != file_idx {
                 continue;
             }
 
-            let new_key = new_for_rep.get(&i).unwrap();
+            let new_key = &new_for_rep[&i];
 
             s.push('@');
             s.push_str(&e.kind);
             s.push('{');
             s.push_str(new_key);
-            s.push(',');
-
-            if e.body.starts_with('\n') {
-                s.push_str(&e.body);
-            } else {
-                s.push('\n');
-                s.push_str(&e.body);
-            }
-
-            if !s.ends_with('\n') {
-                s.push('\n');
-            }
-
+            s.push_str(",\n");
+            s.push_str(&format_bib_body(&e.body));
             s.push_str("}\n\n");
         }
 
@@ -765,6 +791,62 @@ fn render_bib_files(
     }
 
     out
+}
+
+const BIB_INDENT: &str = "  ";
+
+/// One field per line as `name = value`, indented by `BIB_INDENT`; continuation
+/// lines of multi-line values get one extra level.
+fn format_bib_body(body: &str) -> String {
+    let mut fields = Vec::new();
+    let mut rest = body;
+
+    loop {
+        let (field, tail) = match find_top_level_comma(rest) {
+            Some(c) => (&rest[..c], Some(&rest[c + 1..])),
+            None => (rest, None),
+        };
+
+        let field = field.trim();
+        if !field.is_empty() {
+            fields.push(format_bib_field(field));
+        }
+
+        match tail {
+            Some(t) => rest = t,
+            None => break,
+        }
+    }
+
+    let mut out = fields.join(",\n");
+    out.push('\n');
+    out
+}
+
+fn format_bib_field(field: &str) -> String {
+    let field = match field.split_once('=') {
+        Some((name, value)) if is_field_name(name.trim()) => {
+            format!("{} = {}", name.trim(), value.trim())
+        }
+        _ => field.to_string(),
+    };
+
+    field
+        .lines()
+        .enumerate()
+        .map(|(n, line)| match (n, line.trim()) {
+            (_, "") => String::new(),
+            (0, t) => format!("{BIB_INDENT}{t}"),
+            (_, t) => format!("{BIB_INDENT}{BIB_INDENT}{t}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_field_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
 /// Final dedup pass: run after the keys are normalized, so entries that only
@@ -1185,12 +1267,29 @@ mod tests {
         let found = find_include_tex_files(tex, Path::new("main.tex"), Path::new(""));
         assert_eq!(found, vec![PathBuf::from("kept.tex")]);
 
-        let (used, _) = collect_used_citation_keys(tex);
-        assert_eq!(used, HashSet::from(["a".to_string(), "c".to_string()]));
+        let main = TexFile {
+            path: PathBuf::from("main.tex"),
+            content: tex.to_string(),
+        };
+        assert_eq!(citation_order(&[main], Path::new("")), vec!["a", "c"]);
 
         let map = HashMap::from([("a".to_string(), "x".to_string()), ("b".to_string(), "y".to_string())]);
         let out = rewrite_tex_citations(tex, &map, &HashMap::new());
         assert_eq!(out, "% \\input{gone}\n\\input{kept} % \\cite{b}\n50\\% \\cite{x,c}\n");
+    }
+
+    #[test]
+    fn citations_follow_inputs_where_they_occur() {
+        let tex = |path: &str, content: &str| TexFile {
+            path: PathBuf::from(path),
+            content: content.to_string(),
+        };
+        let files = [
+            tex("main.tex", "\\cite{a}\n\\input{chap}\n\\cite[p.~1]{c, a}\n"),
+            tex("chap.tex", "\\citep{b}"),
+        ];
+
+        assert_eq!(citation_order(&files, Path::new("")), vec!["a", "b", "c", "a"]);
     }
 
     #[test]
@@ -1204,6 +1303,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(found, vec![dir.join("b/a.tex")]);
+    }
+
+    #[test]
+    fn bib_fields_are_reindented_uniformly() {
+        let body = "\n\tauthor={Smith, John and\n               Doe, Jane},\n      title =   \"Quantum, Things\",  year=2020,\n abstract = {One.\n\n      Two.},\n\n  ";
+
+        assert_eq!(
+            format_bib_body(body),
+            "  author = {Smith, John and\n    Doe, Jane},\n  title = \"Quantum, Things\",\n  year = 2020,\n  abstract = {One.\n\n    Two.}\n"
+        );
     }
 
     #[test]

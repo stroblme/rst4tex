@@ -6,7 +6,9 @@ A collection of (opinionated) tools written in Rust to improve code quality of a
   - removes duplicates (also those that only become visible once the citation keys are unified)
   - removes unused references (unless `--no-delete` is given)
   - sorts references by date when using multi-citations
+  - orders bibliography entries by first citation in the document (uncited ones last)
   - unifies citation keys to `[auth:lower][veryshorttitle:lower][year]`
+  - formats entries uniformly (one field per line, `name = value`, two-space indent)
   - updates bibliography files and rewrites document citations
 - **fixtex**: formats a given LaTeX document to
   - all the basic formatting rules (double white- and trailing whitespaces, double return lines, etc.)
