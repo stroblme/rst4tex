@@ -869,7 +869,7 @@ fn assign_keys(
             group
                 .iter()
                 .copied()
-                .find(|&j| same_title(&entries[j], &entries[i]))
+                .find(|&j| same_work(&entries[j], &entries[i]))
         });
 
         if let Some(first) = dup {
@@ -886,13 +886,37 @@ fn assign_keys(
 }
 
 // ponytail: same normalized title is enough to call it the same work here, the
-// key already pins author and year. Compare more fields (doi, pages) if that
-// ever merges two distinct papers.
-fn same_title(a: &BibEntry, b: &BibEntry) -> bool {
+// key already pins author and year. Only a doi or version present on both sides
+// and differing keeps them apart, a missing one is treated as the same work.
+fn same_work(a: &BibEntry, b: &BibEntry) -> bool {
     let ta = a.fields.get("title").map(|s| latex_plain(s)).unwrap_or_default();
     let tb = b.fields.get("title").map(|s| latex_plain(s)).unwrap_or_default();
 
-    !ta.is_empty() && ta == tb
+    let conflict = distinct_ids(a)
+        .iter()
+        .zip(distinct_ids(b).iter())
+        .any(|(x, y)| !x.is_empty() && !y.is_empty() && x != y);
+
+    !ta.is_empty() && ta == tb && !conflict
+}
+
+/// Normalized doi and version, which tell apart works sharing author, title and
+/// year, e.g. Zenodo releases of the same software. The doi is cut to start at
+/// its `10.` prefix, so `https://doi.org/10.x` and `10.x` compare equal.
+fn distinct_ids(e: &BibEntry) -> [String; 2] {
+    let doi = e
+        .fields
+        .get("doi")
+        .map(|d| latex_plain(&d[d.find("10.").unwrap_or(0)..]))
+        .unwrap_or_default();
+
+    let version = e
+        .fields
+        .get("version")
+        .map(|v| latex_plain(v))
+        .unwrap_or_default();
+
+    [doi, version]
 }
 
 fn entry_signature(e: &BibEntry) -> String {
@@ -914,7 +938,15 @@ fn entry_signature(e: &BibEntry) -> String {
     if title.trim().is_empty() {
         format!("key:{}", e.old_key.to_ascii_lowercase())
     } else {
-        format!("{}|{}|{}", normalize_spaces(&author), normalize_spaces(&title), year)
+        // doi/version in here only splits groups; `same_work` re-merges entries
+        // where one side lacks them.
+        format!(
+            "{}|{}|{}|{}",
+            normalize_spaces(&author),
+            normalize_spaces(&title),
+            year,
+            distinct_ids(e).join("|")
+        )
     }
 }
 
@@ -1329,5 +1361,31 @@ mod tests {
         assert_eq!(merged_into.get(&1), Some(&0));
         assert_eq!(new_for_rep[&0], "smith_quantum_2020");
         assert_eq!(new_for_rep[&2], "smith_quantum_2020_2");
+    }
+
+    #[test]
+    fn zenodo_versions_stay_apart() {
+        let with = |key: &str, doi: Option<&str>| {
+            let mut e = entry(key, "Doe, Jane", "Some Tool", "2023");
+            if let Some(d) = doi {
+                e.fields.insert("doi".to_string(), d.to_string());
+            }
+            e
+        };
+        let entries = vec![
+            with("v1", Some("{10.5281/zenodo.111}")),
+            with("v2", Some("{10.5281/zenodo.222}")),
+            with("v1_url", Some("https://doi.org/10.5281/zenodo.111")),
+            with("bare", None),
+        ];
+
+        assert_ne!(entry_signature(&entries[0]), entry_signature(&entries[1]));
+
+        let (kept, new_for_rep, merged_into) = assign_keys(&entries, &[0, 1, 2, 3]);
+
+        assert_eq!(kept, vec![0, 1]);
+        assert_eq!(merged_into.get(&2), Some(&0));
+        assert_eq!(merged_into.get(&3), Some(&0));
+        assert_eq!(new_for_rep[&1], "doe_some_2023_2");
     }
 }
