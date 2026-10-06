@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_delete = std::env::args().any(|a| a == "--no-delete");
     let root_dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
     let tex_files = collect_tex_files(&tex_path)?;
+    let macros = key_macros(&tex_files);
     let bib_paths = find_bib_files(&tex_files, root_dir);
 
     if bib_paths.is_empty() {
@@ -61,7 +62,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entries.append(&mut file_entries);
     }
 
-    let used_keys: HashSet<String> = citation_order(&tex_files, root_dir).into_iter().collect();
+    let used_keys: HashSet<String> = citation_order(&tex_files, root_dir, &macros)
+        .into_iter()
+        .collect();
     let keep_all = no_delete || used_keys.contains("*");
 
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
@@ -119,13 +122,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|tf| TexFile {
             path: tf.path.clone(),
-            content: rewrite_tex_citations(&tf.content, &old_to_new, &new_key_year),
+            content: rewrite_tex_citations(&tf.content, &old_to_new, &new_key_year, &macros),
         })
         .collect();
 
     // Order entries by first citation in the rewritten document. rev() so the first
     // occurrence wins; uncited entries stay at the end in their old order (stable sort).
-    let first_cite: HashMap<String, usize> = citation_order(&new_tex_files, root_dir)
+    let first_cite: HashMap<String, usize> = citation_order(&new_tex_files, root_dir, &macros)
         .into_iter()
         .enumerate()
         .rev()
@@ -152,6 +155,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Scanned tex files:");
     for tf in &tex_files {
         eprintln!("  {}", tf.path.display());
+    }
+
+    if !macros.is_empty() {
+        let mut names: Vec<_> = macros.iter().collect();
+        names.sort();
+        eprintln!();
+        eprintln!("Macros passing citation keys:");
+        for (name, arg) in names {
+            eprintln!("  \\{} (argument {})", name, arg + 1);
+        }
     }
 
     eprintln!();
@@ -566,7 +579,11 @@ fn parse_fields(body: &str) -> HashMap<String, String> {
 
 /// Cited keys in document order (with repeats): \include, \input and \subfile are
 /// descended into where they occur, starting at the main file `tex_files[0]`.
-fn citation_order(tex_files: &[TexFile], root_dir: &Path) -> Vec<String> {
+fn citation_order(
+    tex_files: &[TexFile],
+    root_dir: &Path,
+    macros: &HashMap<String, usize>,
+) -> Vec<String> {
     let by_id: HashMap<PathBuf, &TexFile> = tex_files
         .iter()
         .map(|tf| (path_identity(&tf.path), tf))
@@ -574,7 +591,7 @@ fn citation_order(tex_files: &[TexFile], root_dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
 
     if let Some(main) = tex_files.first() {
-        citation_order_inner(main, &by_id, root_dir, &mut HashSet::new(), &mut out);
+        citation_order_inner(main, &by_id, root_dir, macros, &mut HashSet::new(), &mut out);
     }
 
     out
@@ -584,6 +601,7 @@ fn citation_order_inner(
     tf: &TexFile,
     by_id: &HashMap<PathBuf, &TexFile>,
     root_dir: &Path,
+    macros: &HashMap<String, usize>,
     seen: &mut HashSet<PathBuf>,
     out: &mut Vec<String>,
 ) {
@@ -602,25 +620,32 @@ fn citation_order_inner(
             continue;
         }
 
-        let accept = |c: &str| is_cite_cmd(c) || INCLUDE_CMDS.contains(&c);
+        let arg_of = |c: &str| {
+            if INCLUDE_CMDS.contains(&c) {
+                Some(0)
+            } else {
+                key_arg(c, macros)
+            }
+        };
 
-        let Some((cmd, s, e)) = command_arg_at(tex, i, accept) else {
+        let Some((cmd, s, e)) = command_arg_at(tex, i, &arg_of) else {
             i += 1;
             continue;
         };
 
-        if is_cite_cmd(&cmd) {
+        if !INCLUDE_CMDS.contains(&cmd.as_str()) {
+            // `#2` and the like are parameters inside a macro definition, not keys
             out.extend(
                 tex[s..e]
                     .split(',')
                     .map(str::trim)
-                    .filter(|k| !k.is_empty())
+                    .filter(|k| !k.is_empty() && !k.starts_with('#'))
                     .map(String::from),
             );
         } else {
             let p = resolve_path(tex[s..e].trim(), "tex", root_dir, base_dir);
             if let Some(child) = by_id.get(&path_identity(&p)) {
-                citation_order_inner(child, by_id, root_dir, seen, out);
+                citation_order_inner(child, by_id, root_dir, macros, seen, out);
             }
         }
 
@@ -632,6 +657,7 @@ fn rewrite_tex_citations(
     tex: &str,
     old_to_new: &HashMap<String, String>,
     new_key_year: &HashMap<String, i32>,
+    macros: &HashMap<String, usize>,
 ) -> String {
     let mut out = String::new();
     let code = mask_comments(tex);
@@ -645,7 +671,29 @@ fn rewrite_tex_citations(
             continue;
         }
 
-        if let Some((cmd, s, e)) = command_arg_at(&code, i, is_cite_cmd) {
+        let Some((cmd, s, e)) = command_arg_at(&code, i, &|c| key_arg(c, macros)) else {
+            i += 1;
+            continue;
+        };
+
+        // Key lists of \nocite, \addtocategory and macros keep their layout, as their
+        // order does not show in the document: swap each key in place.
+        if cmd == "nocite" || !is_cite_cmd(&cmd) || macros.contains_key(&cmd) {
+            let mut off = s;
+
+            for part in code[s..e].split(',') {
+                let k = part.trim();
+
+                if let Some(new) = old_to_new.get(k) {
+                    let ks = off + part.len() - part.trim_start().len();
+                    out.push_str(&tex[last..ks]);
+                    out.push_str(new);
+                    last = ks + k.len();
+                }
+
+                off += part.len() + 1;
+            }
+        } else {
             let old_group = &code[s..e];
 
             let mut keys: Vec<String> = old_group
@@ -655,7 +703,7 @@ fn rewrite_tex_citations(
                 .map(|k| old_to_new.get(&k).cloned().unwrap_or(k))
                 .collect();
 
-            if keys.len() > 1 && !keys.iter().any(|k| k == "*") && cmd != "nocite" {
+            if keys.len() > 1 && !keys.iter().any(|k| k == "*") {
                 let mut indexed: Vec<(usize, String)> = keys.into_iter().enumerate().collect();
 
                 indexed.sort_by(|a, b| {
@@ -670,22 +718,21 @@ fn rewrite_tex_citations(
             out.push_str(&tex[last..s]);
             out.push_str(&keys.join(","));
             last = e;
-            i = e + 1;
-        } else {
-            i += 1;
         }
+
+        i = e + 1;
     }
 
     out.push_str(&tex[last..]);
     out
 }
 
-/// `(command, arg_start, arg_end)` for a command at `pos` that `accept`s, skipping
-/// a `*` and optional `[...]` arguments before its `{...}` argument.
+/// `(command, arg_start, arg_end)` of the `{...}` argument that `arg_of` picks (0-based)
+/// for the command at `pos`, skipping a `*` and optional `[...]` arguments.
 fn command_arg_at(
     tex: &str,
     pos: usize,
-    accept: fn(&str) -> bool,
+    arg_of: &dyn Fn(&str) -> Option<usize>,
 ) -> Option<(String, usize, usize)> {
     let b = tex.as_bytes();
 
@@ -705,8 +752,95 @@ fn command_arg_at(
     }
 
     let cmd = tex[cmd_start..i].to_string();
+    let arg = arg_of(&cmd)?;
 
-    if !accept(&cmd) {
+    if i < b.len() && b[i] == b'*' {
+        i += 1;
+    }
+
+    for n in 0..=arg {
+        loop {
+            i = skip_ws(tex, i);
+
+            if i < b.len() && b[i] == b'[' {
+                let close = find_matching(tex, i, b'[', b']')?;
+                i = close + 1;
+            } else {
+                break;
+            }
+        }
+
+        if i >= b.len() || b[i] != b'{' {
+            return None;
+        }
+
+        let close = find_matching(tex, i, b'{', b'}')?;
+
+        if n == arg {
+            return Some((cmd, i + 1, close));
+        }
+
+        i = close + 1;
+    }
+
+    None
+}
+
+/// The `{...}` argument (0-based) of `cmd` that holds citation keys, if any.
+fn key_arg(cmd: &str, macros: &HashMap<String, usize>) -> Option<usize> {
+    if let Some(&arg) = macros.get(cmd) {
+        Some(arg)
+    } else if cmd == "addtocategory" {
+        Some(1)
+    } else if is_cite_cmd(cmd) {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// User macros that pass an argument on as citation keys, mapped to that argument, e.g.
+/// `\newcommand{\pubs}[2]{\addtocategory{#1}{#2}\nocite{#2}}` gives `pubs -> 1`.
+/// Definitions are read in file order, so a macro may wrap an earlier one.
+fn key_macros(tex_files: &[TexFile]) -> HashMap<String, usize> {
+    let mut macros = HashMap::new();
+
+    for tf in tex_files {
+        let tex = &mask_comments(&tf.content);
+
+        for (pos, _) in tex.match_indices('\\') {
+            let Some((name, has_default, body)) = macro_def_at(tex, pos) else {
+                continue;
+            };
+
+            let arg = body.match_indices('\\').find_map(|(j, _)| {
+                let (_, s, e) = command_arg_at(body, j, &|c| key_arg(c, &macros))?;
+                let param: usize = body[s..e].trim().strip_prefix('#')?.parse().ok()?;
+                // ponytail: keys in the optional argument (#1 with a default) are not followed
+                param.checked_sub(1 + has_default as usize)
+            });
+
+            if let Some(arg) = arg {
+                macros.insert(name, arg);
+            }
+        }
+    }
+
+    macros
+}
+
+/// `(name, has_default, body)` of a `\newcommand`, `\renewcommand` or `\providecommand`
+/// at `pos`; `has_default` marks an optional first argument (`[n][default]`).
+fn macro_def_at(tex: &str, pos: usize) -> Option<(String, bool, &str)> {
+    let b = tex.as_bytes();
+    let mut i = pos + 1;
+    let cmd_start = i;
+
+    while i < b.len() && b[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+
+    if !["newcommand", "renewcommand", "providecommand"].contains(&&tex[cmd_start..i]) {
         return None;
     }
 
@@ -714,25 +848,55 @@ fn command_arg_at(
         i += 1;
     }
 
+    i = skip_ws(tex, i);
+    let braced = i < b.len() && b[i] == b'{';
+
+    if braced {
+        i = skip_ws(tex, i + 1);
+    }
+
+    if i >= b.len() || b[i] != b'\\' {
+        return None;
+    }
+
+    i += 1;
+    let name_start = i;
+
+    while i < b.len() && b[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+
+    let name = tex[name_start..i].to_string();
+
+    if braced {
+        i = skip_ws(tex, i);
+
+        if i >= b.len() || b[i] != b'}' {
+            return None;
+        }
+
+        i += 1;
+    }
+
+    let mut optionals = 0;
+
     loop {
         i = skip_ws(tex, i);
 
         if i < b.len() && b[i] == b'[' {
-            let close = find_matching(tex, i, b'[', b']')?;
-            i = close + 1;
+            i = find_matching(tex, i, b'[', b']')? + 1;
+            optionals += 1;
         } else {
             break;
         }
     }
 
-    i = skip_ws(tex, i);
-
-    if i < b.len() && b[i] == b'{' {
-        let close = find_matching(tex, i, b'{', b'}')?;
-        return Some((cmd, i + 1, close));
+    if i >= b.len() || b[i] != b'{' {
+        return None;
     }
 
-    None
+    let close = find_matching(tex, i, b'{', b'}')?;
+    Some((name, optionals > 1, &tex[i + 1..close]))
 }
 
 fn is_cite_cmd(cmd: &str) -> bool {
@@ -1303,10 +1467,10 @@ mod tests {
             path: PathBuf::from("main.tex"),
             content: tex.to_string(),
         };
-        assert_eq!(citation_order(&[main], Path::new("")), vec!["a", "c"]);
+        assert_eq!(citation_order(&[main], Path::new(""), &HashMap::new()), vec!["a", "c"]);
 
         let map = HashMap::from([("a".to_string(), "x".to_string()), ("b".to_string(), "y".to_string())]);
-        let out = rewrite_tex_citations(tex, &map, &HashMap::new());
+        let out = rewrite_tex_citations(tex, &map, &HashMap::new(), &HashMap::new());
         assert_eq!(out, "% \\input{gone}\n\\input{kept} % \\cite{b}\n50\\% \\cite{x,c}\n");
     }
 
@@ -1321,7 +1485,31 @@ mod tests {
             tex("chap.tex", "\\citep{b}"),
         ];
 
-        assert_eq!(citation_order(&files, Path::new("")), vec!["a", "b", "c", "a"]);
+        assert_eq!(
+            citation_order(&files, Path::new(""), &HashMap::new()),
+            vec!["a", "b", "c", "a"]
+        );
+    }
+
+    #[test]
+    fn keys_passed_through_macros_are_found() {
+        let tex = "\\newcommand*{\\pubs}[2]{\\addtocategory{#1}{#2}\\nocite{#2}}\n\
+                   \\pubs{sw}{\n  a,\n  b}\n\\addtocategory{eq}{b, a}\n";
+        let main = TexFile {
+            path: PathBuf::from("main.tex"),
+            content: tex.to_string(),
+        };
+
+        let macros = key_macros(std::slice::from_ref(&main));
+        assert_eq!(macros, HashMap::from([("pubs".to_string(), 1)]));
+        assert_eq!(citation_order(&[main], Path::new(""), &macros), vec!["a", "b", "b", "a"]);
+
+        let map = HashMap::from([("b".to_string(), "y".to_string())]);
+        assert_eq!(
+            rewrite_tex_citations(tex, &map, &HashMap::new(), &macros),
+            "\\newcommand*{\\pubs}[2]{\\addtocategory{#1}{#2}\\nocite{#2}}\n\
+             \\pubs{sw}{\n  a,\n  y}\n\\addtocategory{eq}{y, a}\n"
+        );
     }
 
     #[test]
